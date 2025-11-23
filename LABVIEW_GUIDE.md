@@ -26,6 +26,8 @@ LabVIEW가 데이터를 읽을 수 있도록 Python 프로그램을 **브릿지 
 python main.py --enable-labview-bridge --labview-write-frame
 ```
 
+> **성능 팁**: LabVIEW에서 영상 확인이 필요 없다면 `--labview-write-frame` 옵션을 빼세요. 또한 `--no-gui` 옵션을 추가하면 GUI 렌더링을 생략하여 처리 속도(FPS)가 극대화됩니다.
+
 ### 생성되는 파일 확인
 실행 후 `labview_bridge/` 폴더에 다음 두 파일이 생성되고 계속 갱신되는지 확인하세요.
 *   `state.json`: 텍스트 데이터 (조향각, 오프셋 등)

@@ -14,6 +14,61 @@ from typing import Tuple, Optional, List
 from config import get_config
 
 
+class LaneTracker:
+    """Kalman Filter를 이용한 차선 추적 클래스"""
+    def __init__(self):
+        # State: [a, b, c, da, db, dc] (2차 곡선 계수 및 변화율)
+        self.kf = cv2.KalmanFilter(6, 3)
+        self.kf.transitionMatrix = np.eye(6, dtype=np.float32)
+        # dt = 1 (프레임 단위)
+        self.kf.transitionMatrix[0, 3] = 1.0
+        self.kf.transitionMatrix[1, 4] = 1.0
+        self.kf.transitionMatrix[2, 5] = 1.0
+        
+        self.kf.measurementMatrix = np.eye(3, 6, dtype=np.float32)
+        
+        # Process Noise (시스템 노이즈)
+        self.kf.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-4
+        
+        # Measurement Noise (측정 노이즈) - 값이 클수록 측정값보다 예측값을 더 신뢰
+        self.kf.measurementNoiseCov = np.eye(3, dtype=np.float32) * 1e-1
+        
+        self.kf.errorCovPost = np.eye(6, dtype=np.float32)
+        
+        self.initialized = False
+
+    def update(self, fit: Optional[np.ndarray]) -> Optional[np.ndarray]:
+        """
+        측정값으로 필터를 업데이트하고 최적 추정값을 반환한다.
+        fit이 None이면 예측값만 반환한다.
+        """
+        if fit is None:
+            if not self.initialized:
+                return None
+            # 측정값이 없으면 예측만 수행
+            pred = self.kf.predict()
+            return pred[:3].flatten()
+        
+        fit = np.array(fit, dtype=np.float32)
+        
+        if not self.initialized:
+            # 초기화
+            self.kf.statePost = np.array([
+                [fit[0]], [fit[1]], [fit[2]],
+                [0], [0], [0]
+            ], dtype=np.float32)
+            self.initialized = True
+            return fit
+            
+        # 예측 및 보정
+        self.kf.predict()
+        corrected = self.kf.correct(fit)
+        return corrected[:3].flatten()
+        
+    def reset(self):
+        self.initialized = False
+
+
 class LaneDetector:
     """차선 검출 클래스"""
     
@@ -21,20 +76,31 @@ class LaneDetector:
         """초기화"""
         self.config = get_config()
         
-        # 원근 변환 행렬 (캘리브레이션 후 설정)
-        self.M = None  # 변환 행렬
-        self.M_inv = None  # 역변환 행렬
+        # 원근 변환 행렬 및 맵
+        self.M = None
+        self.M_inv = None
+        self.map_x = None
+        self.map_y = None
+        
         self.hood_mask = None
         self._hood_mask_shape = None
         
-        # 이전 프레임 정보 (시간적 일관성 유지)
-        self.left_fit = None   # 좌측 차선 다항식 계수
-        self.right_fit = None  # 우측 차선 다항식 계수
+        # Kalman Filter Trackers
+        self.left_tracker = LaneTracker()
+        self.right_tracker = LaneTracker()
+        
+        # 이전 프레임 정보 (호환성 유지용)
+        self.left_fit = None
+        self.right_fit = None
+        
+        # Hood Mask Warped Bounds
+        self.hood_warped_left_x = None
+        self.hood_warped_right_x = None
         
         # 검출 상태
         self.detected = False
         
-        # 프레임 카운터 (연속 검출 실패 추적)
+        # 프레임 카운터
         self.frame_count = 0
         self.detection_failure_count = 0
         
@@ -44,6 +110,9 @@ class LaneDetector:
             'max_y': 0,
             'mean_y': 0.0
         }
+        
+        # 학습된 차선 폭
+        self.avg_lane_width = 548.0
 
         self._last_roi_bounds: Tuple[int, int, int] = (0, self.config.camera.height, self.config.camera.height)
         
@@ -71,10 +140,72 @@ class LaneDetector:
         self._scaled_src = src
         self._scaled_dst = dst
         
+        # [FPS 최적화] Remap용 맵 생성 (warpPerspective 대체)
+        self._init_remap_maps()
+        
+        # 차량 마스크 기준 탐색 범위 계산
+        self._calculate_warped_hood_bounds()
+
+    def _init_remap_maps(self):
+        """warpPerspective 속도 향상을 위한 Remap Map 생성"""
+        h, w = self.config.camera.height, self.config.camera.width
+        
+        # 목적지 이미지의 좌표 그리드 생성
+        map_x, map_y = np.meshgrid(np.arange(w), np.arange(h))
+        
+        # 좌표 평탄화 및 동차 좌표계 변환 [x, y, 1]
+        # shape: (3, N)
+        coords = np.stack([map_x.flatten(), map_y.flatten(), np.ones(w*h)])
+        
+        # 역변환 행렬 적용: dst -> src 좌표 계산
+        # src_coords = M_inv * dst_coords
+        src_coords = self.M_inv @ coords
+        
+        # 동차 좌표 정규화 (w로 나누기)
+        src_coords = src_coords / (src_coords[2, :] + 1e-6)
+        
+        # 맵 형태로 다시 변환
+        self.map_x = src_coords[0, :].reshape(h, w).astype(np.float32)
+        self.map_y = src_coords[1, :].reshape(h, w).astype(np.float32)
+        # print("[INFO] Perspective Remap Maps Initialized")
+        
         # print(f"[INFO] Perspective Transform Initialized:")
         # print(f"  - Source Y Range: {src[0][1]:.1f} ~ {src[3][1]:.1f}")
-        # print(f"  - Dest Y Range: {dst[0][1]:.1f} ~ {dst[3][1]:.1f}")
-        # print(f"  - Note: This range defines the visible area in Bird's Eye View.")
+
+    def _calculate_warped_hood_bounds(self):
+        """차량 마스크(보닛)의 하단 경계를 BEV 좌표로 변환하여 차선 탐색 범위를 제한한다."""
+        polygon = self.config.lane_detection.hood_mask_polygon
+        if polygon is None or len(polygon) == 0:
+            return
+
+        # 하단부(y > 0.9) 포인트만 추출 (정규화 좌표 기준)
+        bottom_points = [p for p in polygon if p[1] > 0.9]
+        if not bottom_points:
+            bottom_points = polygon
+        
+        bottom_points = np.array(bottom_points)
+        
+        # 좌측 끝(최소 x)과 우측 끝(최대 x) 찾기
+        min_x_idx = np.argmin(bottom_points[:, 0])
+        max_x_idx = np.argmax(bottom_points[:, 0])
+        
+        left_pt_norm = bottom_points[min_x_idx]
+        right_pt_norm = bottom_points[max_x_idx]
+        
+        w, h = self.config.camera.width, self.config.camera.height
+        
+        # 원본 좌표계로 변환
+        src_pts = np.array([
+            [left_pt_norm[0] * w, left_pt_norm[1] * h],
+            [right_pt_norm[0] * w, right_pt_norm[1] * h]
+        ], dtype=np.float32).reshape(-1, 1, 2)
+        
+        # BEV 좌표계로 변환
+        dst_pts = cv2.perspectiveTransform(src_pts, self.M)
+        
+        self.hood_warped_left_x = int(dst_pts[0][0][0])
+        self.hood_warped_right_x = int(dst_pts[1][0][0])
+        # print(f"[INFO] Warped Hood Bounds: Left={self.hood_warped_left_x}, Right={self.hood_warped_right_x}")
 
     def _scale_points(self, points: np.ndarray, sx: float, sy: float) -> np.ndarray:
         pts = np.array(points, dtype=np.float32)
@@ -179,6 +310,13 @@ class LaneDetector:
         
         # 4. Canny Edge Detection
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        
+        # [추가] Top-Hat 변환으로 검-흰-검 패턴(밝은 선) 강조
+        # 차선 폭보다 약간 큰 커널을 사용하여 밝은 선만 추출
+        tophat_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+        tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, tophat_kernel)
+        _, tophat_mask = cv2.threshold(tophat, 30, 255, cv2.THRESH_BINARY)
+        
         blurred = cv2.GaussianBlur(
             gray, 
             (self.config.lane_detection.gaussian_kernel_size, 
@@ -197,6 +335,7 @@ class LaneDetector:
         # 5. 색상 마스크와 에지 결합
         combined = cv2.bitwise_or(combined_mask, edges)
         combined = cv2.bitwise_or(combined, triplet_mask)
+        combined = cv2.bitwise_or(combined, tophat_mask)  # Top-Hat 결과 추가
         
         # 6. 전체 이미지 크기로 복원 (상단은 0으로 채움)
         full_binary = np.zeros((height, width), dtype=np.uint8)
@@ -267,7 +406,7 @@ class LaneDetector:
     
     def _detect_white_lane(self, image: np.ndarray) -> np.ndarray:
         """
-        흰색 차선 검출
+        흰색 차선 검출 (Adaptive Threshold 추가)
         
         Args:
             image: BGR 이미지
@@ -275,19 +414,33 @@ class LaneDetector:
         Returns:
             흰색 차선 이진 마스크
         """
-        # HLS 색 공간 변환 (밝기 변화에 강함)
+        # 1. HLS L-channel Threshold
         hls = cv2.cvtColor(image, cv2.COLOR_BGR2HLS)
-        
-        # L 채널(밝기)과 S 채널(채도) 사용
         l_channel = hls[:, :, 1]
-        s_channel = hls[:, :, 2]
         
-        # 흰색: 높은 밝기, 낮은 채도
-        white_mask = cv2.inRange(
-            l_channel,
-            self.config.lane_detection.white_threshold,
-            255
+        # Config 값 사용하되, 너무 높으면(200 이상) 조금 낮춰서 잡음
+        thresh = min(self.config.lane_detection.white_threshold, 170)
+        white_mask_hls = cv2.inRange(l_channel, thresh, 255)
+        
+        # 2. Adaptive Threshold (조명 변화에 강함)
+        # 그레이스케일 변환 후 적응형 이진화
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        white_mask_adaptive = cv2.adaptiveThreshold(
+            gray,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY,
+            21,  # Block size (홀수)
+            -5   # C constant (음수면 밝은 영역 강조)
         )
+        
+        # 두 결과 결합 (OR)
+        # HLS는 밝은 흰색을 잘 잡고, Adaptive는 대비가 있는 선을 잘 잡음
+        white_mask = cv2.bitwise_or(white_mask_hls, white_mask_adaptive)
+        
+        # 노이즈 제거 (Morphology Open)
+        kernel = np.ones((3, 3), np.uint8)
+        white_mask = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, kernel)
         
         return white_mask
     
@@ -316,7 +469,7 @@ class LaneDetector:
     
     def warp_perspective(self, image: np.ndarray) -> np.ndarray:
         """
-        Bird's Eye View로 원근 변환
+        Bird's Eye View로 원근 변환 (Optimized with remap)
         
         Args:
             image: 입력 이미지
@@ -324,48 +477,85 @@ class LaneDetector:
         Returns:
             변환된 이미지
         """
-        height, width = image.shape[:2]
-        
-        warped = cv2.warpPerspective(
-            image,
-            self.M,
-            (width, height),
-            flags=cv2.INTER_LINEAR
-        )
+        if self.map_x is not None and self.map_y is not None:
+            # [FPS 최적화] 미리 계산된 맵 사용 (약 2~3배 빠름)
+            warped = cv2.remap(
+                image,
+                self.map_x,
+                self.map_y,
+                interpolation=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT
+            )
+        else:
+            # Fallback
+            height, width = image.shape[:2]
+            warped = cv2.warpPerspective(
+                image,
+                self.M,
+                (width, height),
+                flags=cv2.INTER_LINEAR
+            )
         
         return warped
     
     def find_lane_pixels_sliding_window(
         self, 
-        binary_warped: np.ndarray
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        binary_warped: np.ndarray,
+        visualize: bool = True
+    ) -> Tuple[Optional[np.ndarray], np.ndarray, np.ndarray]:
         """
         Sliding Window 알고리즘으로 차선 픽셀 검출
-        
-        Args:
-            binary_warped: Bird's eye view 이진 이미지
-            
-        Returns:
-            out_img: 시각화 이미지
-            left_lane_inds: 좌측 차선 픽셀 인덱스
-            right_lane_inds: 우측 차선 픽셀 인덱스
         """
         roi_top, roi_bottom, roi_height = self._last_roi_bounds
 
         # 히스토그램으로 차선 시작점 찾기 (전체 영역 사용)
         histogram = np.sum(binary_warped, axis=0)
         
-        # 시각화용 컬러 이미지 생성
-        out_img = np.dstack((binary_warped, binary_warped, binary_warped)) * 255
+        # 시각화용 컬러 이미지 생성 (필요 시에만)
+        out_img = None
+        if visualize:
+            out_img = np.dstack((binary_warped, binary_warped, binary_warped)) * 255
         
         # 좌/우 차선 시작점 (히스토그램 피크)
         midpoint = len(histogram) // 2
-        leftx_base = np.argmax(histogram[:midpoint]) if midpoint > 0 else 0
-        right_slice = histogram[midpoint:] if midpoint > 0 else histogram
-        rightx_base = (
-            np.argmax(right_slice) + midpoint
-            if right_slice.size > 0 else 0
-        )
+        
+        # [수정] 차량 마스크 기준 탐색 범위 제한
+        # 차량 폭(보닛)을 기준으로 일정 범위 내에서만 차선 시작점을 찾음
+        search_margin = 100  # 탐색 범위 완화 (60 -> 100)
+        
+        if self.hood_warped_left_x is not None and self.hood_warped_right_x is not None:
+            # Left Lane: Hood 왼쪽 끝 주변 탐색
+            l_center = self.hood_warped_left_x
+            l_min = max(0, l_center - search_margin)
+            l_max = min(midpoint, l_center + search_margin)
+            
+            hist_slice_l = histogram[l_min:l_max]
+            if len(hist_slice_l) > 0:
+                leftx_base = np.argmax(hist_slice_l) + l_min
+            else:
+                # 범위 내에 없으면 전체 좌측 영역에서 찾음 (Fallback)
+                leftx_base = np.argmax(histogram[:midpoint]) if midpoint > 0 else 0
+
+            # Right Lane: Hood 오른쪽 끝 주변 탐색
+            r_center = self.hood_warped_right_x
+            r_min = max(midpoint, r_center - search_margin)
+            r_max = min(binary_warped.shape[1], r_center + search_margin)
+            
+            hist_slice_r = histogram[r_min:r_max]
+            if len(hist_slice_r) > 0:
+                rightx_base = np.argmax(hist_slice_r) + r_min
+            else:
+                # 범위 내에 없으면 전체 우측 영역에서 찾음 (Fallback)
+                right_slice = histogram[midpoint:] if midpoint > 0 else histogram
+                rightx_base = (np.argmax(right_slice) + midpoint) if right_slice.size > 0 else 0
+        else:
+            # 기존 로직 (전체 탐색)
+            leftx_base = np.argmax(histogram[:midpoint]) if midpoint > 0 else 0
+            right_slice = histogram[midpoint:] if midpoint > 0 else histogram
+            rightx_base = (
+                np.argmax(right_slice) + midpoint
+                if right_slice.size > 0 else 0
+            )
 
         # 윈도우 설정
         n_windows = max(1, self.config.sliding_window.n_windows)
@@ -406,20 +596,21 @@ class LaneDetector:
             win_xright_high = rightx_current + margin
             
             # 윈도우 그리기 (시각화)
-            cv2.rectangle(
-                out_img,
-                (win_xleft_low, win_y_low),
-                (win_xleft_high, win_y_high),
-                self.config.gui.color_left_lane,
-                2
-            )
-            cv2.rectangle(
-                out_img,
-                (win_xright_low, win_y_low),
-                (win_xright_high, win_y_high),
-                self.config.gui.color_right_lane,
-                2
-            )
+            if visualize and out_img is not None:
+                cv2.rectangle(
+                    out_img,
+                    (win_xleft_low, win_y_low),
+                    (win_xleft_high, win_y_high),
+                    self.config.gui.color_left_lane,
+                    2
+                )
+                cv2.rectangle(
+                    out_img,
+                    (win_xright_low, win_y_low),
+                    (win_xright_high, win_y_high),
+                    self.config.gui.color_right_lane,
+                    2
+                )
             
             # 윈도우 내 픽셀 찾기
             good_left_inds = (
@@ -454,13 +645,17 @@ class LaneDetector:
         binary_warped: np.ndarray,
         left_fit: Optional[np.ndarray],
         right_fit: Optional[np.ndarray],
-        margin: Optional[int] = None
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        margin: Optional[int] = None,
+        visualize: bool = True
+    ) -> Tuple[Optional[np.ndarray], np.ndarray, np.ndarray]:
         """이전 프레임의 다항식을 활용해 빠르게 차선 픽셀을 찾는다."""
         if margin is None:
             margin = self.config.sliding_window.margin
 
-        out_img = np.dstack((binary_warped, binary_warped, binary_warped)) * 255
+        out_img = None
+        if visualize:
+            out_img = np.dstack((binary_warped, binary_warped, binary_warped)) * 255
+            
         nonzero = binary_warped.nonzero()
         nonzeroy = np.array(nonzero[0])
         nonzerox = np.array(nonzero[1])
@@ -474,7 +669,8 @@ class LaneDetector:
                 (nonzerox >= (left_fitx - margin)) &
                 (nonzerox <= (left_fitx + margin))
             ).nonzero()[0]
-            out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = self.config.gui.color_left_lane
+            if visualize and out_img is not None:
+                out_img[nonzeroy[left_lane_inds], nonzerox[left_lane_inds]] = self.config.gui.color_left_lane
 
         if right_fit is not None:
             right_fitx = right_fit[0] * nonzeroy ** 2 + right_fit[1] * nonzeroy + right_fit[2]
@@ -482,7 +678,8 @@ class LaneDetector:
                 (nonzerox >= (right_fitx - margin)) &
                 (nonzerox <= (right_fitx + margin))
             ).nonzero()[0]
-            out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = self.config.gui.color_right_lane
+            if visualize and out_img is not None:
+                out_img[nonzeroy[right_lane_inds], nonzerox[right_lane_inds]] = self.config.gui.color_right_lane
 
         return out_img, left_lane_inds, right_lane_inds
     
@@ -537,12 +734,13 @@ class LaneDetector:
         
         return left_fit, right_fit
     
-    def detect_lanes(self, frame: np.ndarray) -> dict:
+    def detect_lanes(self, frame: np.ndarray, visualize: bool = True) -> dict:
         """
         차선 검출 메인 함수
         
         Args:
             frame: 입력 프레임 (BGR)
+            visualize: 시각화 이미지 생성 여부 (False일 경우 FPS 향상)
             
         Returns:
             검출 결과 딕셔너리
@@ -562,16 +760,21 @@ class LaneDetector:
             self.right_fit is not None
         )
 
-        out_img: np.ndarray
+        out_img = None
         left_lane_inds: np.ndarray
         right_lane_inds: np.ndarray
 
         if use_prior:
-            out_img, left_lane_inds, right_lane_inds = self.find_lane_pixels_using_prior(
+            # Prior 탐색은 시각화가 필요 없으면 이미지 생성을 건너뛰도록 내부 수정 필요하지만,
+            # 여기서는 반환값만 무시하는 형태로 처리 (함수 내부 최적화는 별도)
+            _img, left_lane_inds, right_lane_inds = self.find_lane_pixels_using_prior(
                 binary_warped,
                 self.left_fit,
-                self.right_fit
+                self.right_fit,
+                visualize=visualize
             )
+            if visualize:
+                out_img = _img
 
             min_points_prior = self.config.sliding_window.min_pixels * max(
                 4,
@@ -581,34 +784,108 @@ class LaneDetector:
                 len(left_lane_inds) < min_points_prior or
                 len(right_lane_inds) < min_points_prior
             ):
-                out_img, left_lane_inds, right_lane_inds = \
-                    self.find_lane_pixels_sliding_window(binary_warped)
+                _img, left_lane_inds, right_lane_inds = \
+                    self.find_lane_pixels_sliding_window(binary_warped, visualize=visualize)
+                if visualize:
+                    out_img = _img
         else:
-            out_img, left_lane_inds, right_lane_inds = \
-                self.find_lane_pixels_sliding_window(binary_warped)
+            _img, left_lane_inds, right_lane_inds = \
+                self.find_lane_pixels_sliding_window(binary_warped, visualize=visualize)
+            if visualize:
+                out_img = _img
         
         # 4. 다항식 피팅
-        left_fit, right_fit = self.fit_polynomial(
+        new_left_fit, new_right_fit = self.fit_polynomial(
             binary_warped,
             left_lane_inds,
             right_lane_inds
         )
         
-        # 5. 검출 성공 여부 판단
-        if left_fit is not None and right_fit is not None:
-            self.left_fit = left_fit
-            self.right_fit = right_fit
+        # 5. 유효성 검사 및 단일 차선 복구
+        # 예상 차선 폭 (픽셀) - BEV 변환 후의 실제 폭을 사용
+        if self.config.lane_detection.perspective_dst_points is not None:
+            dst = self.config.lane_detection.perspective_dst_points
+            default_width = dst[1][0] - dst[0][0]
+        else:
+            default_width = 548  # Fallback
+            
+        # 현재 프레임에서 사용할 폭 (학습된 값 우선 사용)
+        # 단, 학습된 값이 너무 이상하면(초기값 대비 ±30% 이상) 초기값으로 리셋
+        if abs(self.avg_lane_width - default_width) > (default_width * 0.3):
+            self.avg_lane_width = default_width
+        
+        use_width = self.avg_lane_width
+        
+        # Case 1: 둘 다 잡혔지만 Sanity Check 실패 -> 신뢰도 높은 쪽 기준으로 재생성
+        if new_left_fit is not None and new_right_fit is not None:
+            # Sanity Check 수행
+            is_sane = self._sanity_check(new_left_fit, new_right_fit, binary_warped.shape)
+            
+            if is_sane:
+                # 유효하면 차선 폭 학습 (EMA)
+                # 이미지 하단(차량 근처)에서의 폭을 기준으로 함
+                y_eval = binary_warped.shape[0] - 1
+                lx = new_left_fit[0]*y_eval**2 + new_left_fit[1]*y_eval + new_left_fit[2]
+                rx = new_right_fit[0]*y_eval**2 + new_right_fit[1]*y_eval + new_right_fit[2]
+                current_width = rx - lx
+                
+                # 폭이 합리적인 범위 내에 있을 때만 학습
+                if 0.7 * default_width < current_width < 1.3 * default_width:
+                    self.avg_lane_width = 0.9 * self.avg_lane_width + 0.1 * current_width
+            else:
+                # Sanity Check 실패 시: 더 신뢰할 수 있는 차선 하나만 남기고 나머지 재생성
+                min_pixels = self.config.sliding_window.min_pixels
+                left_count = len(left_lane_inds)
+                right_count = len(right_lane_inds)
+                
+                # 픽셀 수가 현저히 적은 쪽은 버림
+                if left_count > right_count * 1.5:
+                    new_right_fit = np.copy(new_left_fit)
+                    new_right_fit[2] += use_width
+                elif right_count > left_count * 1.5:
+                    new_left_fit = np.copy(new_right_fit)
+                    new_left_fit[2] -= use_width
+                else:
+                    # 둘 다 비슷하면 이전 프레임 정보를 따라가거나, 그냥 둠 (이번 프레임 스킵)
+                    # 여기서는 안전하게 이전 프레임 유지 시도 (detected=False로 처리됨)
+                    pass
+        
+        # Case 2: 하나만 잡힘 -> 학습된 폭으로 나머지 생성
+        elif new_left_fit is not None and new_right_fit is None:
+            new_right_fit = np.copy(new_left_fit)
+            new_right_fit[2] += use_width
+        elif new_left_fit is None and new_right_fit is not None:
+            new_left_fit = np.copy(new_right_fit)
+            new_left_fit[2] -= use_width
+
+        # 최종 확인 (복구된 값으로 다시 Sanity Check)
+        is_valid = False
+        if new_left_fit is not None and new_right_fit is not None:
+            # 복구된 경우 width는 강제로 맞췄으므로 통과 가능성 높음
+            is_valid = self._sanity_check(new_left_fit, new_right_fit, binary_warped.shape)
+
+        if is_valid:
+            # 유효하면 Kalman Filter 업데이트
+            self.left_fit = self.left_tracker.update(new_left_fit)
+            self.right_fit = self.right_tracker.update(new_right_fit)
             self.detected = True
             self.detection_failure_count = 0
         else:
-            # 검출 실패 시 이전 값 유지
+            # 검출 실패 또는 유효성 검사 탈락 시
             self.detection_failure_count += 1
             
-            # 5프레임 연속 실패 시 리셋
+            # 예측값만 사용하여 업데이트 (Kalman Filter Prediction)
+            self.left_fit = self.left_tracker.update(None)
+            self.right_fit = self.right_tracker.update(None)
+            
+            # 5프레임 연속 실패 시 리셋 (완전히 놓침)
             if self.detection_failure_count > 5:
                 self.detected = False
                 self.left_fit = None
                 self.right_fit = None
+                self.left_tracker.reset()
+                self.right_tracker.reset()
+            # 5프레임 이내라면 예측값(self.left_fit)을 사용하여 깜빡임 방지
         
         # 6. 끊긴 차선 보간 (필요 시)
         binary_filled = binary_warped
@@ -727,6 +1004,65 @@ class LaneDetector:
         ) / abs(2 * right_fit_cr[0])
         
         return left_curverad, right_curverad
+
+    def _sanity_check(
+        self,
+        left_fit: np.ndarray,
+        right_fit: np.ndarray,
+        img_shape: Tuple[int, int]
+    ) -> bool:
+        """
+        검출된 차선이 물리적으로 타당한지 검사한다.
+        1. 교차 여부 확인
+        2. 차선 폭 적절성 확인
+        """
+        height, width = img_shape
+        ploty = np.linspace(0, height - 1, num=10)  # 10개 포인트만 샘플링
+        
+        left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+        right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+        
+        # 1. 교차 검사 (모든 구간에서 오른쪽이 더 커야 함)
+        diff = right_fitx - left_fitx
+        if np.any(diff <= 0):
+            # print("[Sanity] Lanes crossed!")
+            return False
+            
+        # 2. 차선 폭 검사
+        # BEV 변환 후의 예상 폭
+        if self.config.lane_detection.perspective_dst_points is not None:
+            dst = self.config.lane_detection.perspective_dst_points
+            default_width = dst[1][0] - dst[0][0]
+        else:
+            default_width = 548
+            
+        # 학습된 폭이 있으면 그것을 기준으로 검사하되, 너무 벗어나지 않도록 함
+        check_width = self.avg_lane_width if hasattr(self, 'avg_lane_width') else default_width
+        
+        # 허용 오차 (±30%)
+        min_width = check_width * 0.70
+        max_width = check_width * 1.30
+        
+        mean_width = np.mean(diff)
+        if mean_width < min_width or mean_width > max_width:
+            # print(f"[Sanity] Width out of range: {mean_width:.1f} (Expected: {expected_width})")
+            return False
+            
+        return True
+
+    def _smooth_fit(
+        self,
+        old_fit: Optional[np.ndarray],
+        new_fit: np.ndarray,
+        alpha: float = 0.2
+    ) -> np.ndarray:
+        """
+        (Deprecated) 지수 이동 평균(EMA)을 이용한 스무딩
+        현재는 Kalman Filter로 대체됨.
+        """
+        if old_fit is None:
+            return new_fit
+        return alpha * new_fit + (1 - alpha) * old_fit
 
 
 # 테스트 코드

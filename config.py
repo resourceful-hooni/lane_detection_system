@@ -114,7 +114,7 @@ class LaneDetectionConfig:
 @dataclass
 class SlidingWindowConfig:
     n_windows: int = 12
-    margin: int = 60
+    margin: int = 100   # 80 -> 100으로 변경 (사용자 요청)
     min_pixels: int = 50
     histogram_start_ratio: float = 0.0
 
