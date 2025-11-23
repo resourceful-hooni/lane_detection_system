@@ -51,11 +51,17 @@ class LabViewBridge:
             if value is None:
                 return None
             if isinstance(value, np.generic):
-                return float(value)
-            try:
-                return float(value)
-            except (TypeError, ValueError):
-                return None
+                val = float(value)
+            else:
+                try:
+                    val = float(value)
+                except (TypeError, ValueError):
+                    return None
+            
+            # LabVIEW JSON 파서는 NaN/Inf를 지원하지 않으므로 0.0 또는 None으로 처리
+            if np.isnan(val) or np.isinf(val):
+                return 0.0
+            return val
 
         gap_flags = lane_result.get("gap_flags", {}) or {}
         gap_flags = {key: bool(val) for key, val in gap_flags.items()}
@@ -79,9 +85,25 @@ class LabViewBridge:
             }
         }
 
-        with self._lock:
-            with open(self.state_path, "w", encoding="utf-8") as fp:
-                json.dump(payload, fp, ensure_ascii=False, indent=2)
+        # Atomic Write: 임시 파일에 먼저 쓰고 이동하여 읽기 충돌 방지
+        temp_path = self.state_path + ".tmp"
+        try:
+            with self._lock:
+                with open(temp_path, "w", encoding="utf-8") as fp:
+                    json.dump(payload, fp, ensure_ascii=False, indent=2)
+                
+                # 파일 이동 (Atomic Operation)
+                os.replace(temp_path, self.state_path)
 
-            if self.write_frame and self.frame_path and frame is not None:
-                cv2.imwrite(self.frame_path, frame)
+                if self.write_frame and self.frame_path and frame is not None:
+                    # 이미지도 동일하게 처리 (선택 사항이나 안전을 위해)
+                    temp_frame_path = self.frame_path + ".tmp"
+                    cv2.imwrite(temp_frame_path, frame)
+                    os.replace(temp_frame_path, self.frame_path)
+        except Exception as e:
+            print(f"[LabViewBridge] Error writing state: {e}")
+            if os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except:
+                    pass

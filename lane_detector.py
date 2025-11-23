@@ -27,11 +27,11 @@ class LaneTracker:
         
         self.kf.measurementMatrix = np.eye(3, 6, dtype=np.float32)
         
-        # Process Noise (시스템 노이즈)
-        self.kf.processNoiseCov = np.eye(6, dtype=np.float32) * 1e-4
+        # Process Noise (시스템 노이즈) - 작을수록 모델 예측을 더 신뢰 (더 부드러움)
+        self.kf.processNoiseCov = np.eye(6, dtype=np.float32) * 5e-5
         
-        # Measurement Noise (측정 노이즈) - 값이 클수록 측정값보다 예측값을 더 신뢰
-        self.kf.measurementNoiseCov = np.eye(3, dtype=np.float32) * 1e-1
+        # Measurement Noise (측정 노이즈) - 클수록 측정값 노이즈를 무시 (더 부드러움)
+        self.kf.measurementNoiseCov = np.eye(3, dtype=np.float32) * 5e-1
         
         self.kf.errorCovPost = np.eye(6, dtype=np.float32)
         
@@ -287,15 +287,46 @@ class LaneDetector:
             
         # roi_top_ratio = np.clip(self.config.lane_detection.roi_top_ratio, 0.0, 1.0)
         roi_bottom_ratio = np.clip(self.config.lane_detection.roi_bottom_ratio, 0.0, 1.0)
+        roi_left_ratio = np.clip(self.config.lane_detection.roi_left_ratio, 0.0, 1.0)
+        roi_right_ratio = np.clip(self.config.lane_detection.roi_right_ratio, 0.0, 1.0)
 
         roi_top = int(height * roi_top_ratio)
         roi_bottom = int(height * roi_bottom_ratio)
+        roi_left = int(width * roi_left_ratio)
+        roi_right = int(width * roi_right_ratio)
+
         if roi_bottom <= roi_top:
             roi_bottom = height
         
-        self._last_roi_bounds = (roi_top, roi_bottom, height)
-        roi = frame[roi_top:roi_bottom, :]
+        if roi_right <= roi_left:
+            roi_right = width
+            roi_left = 0
         
+        self._last_roi_bounds = (roi_top, roi_bottom, height)
+        roi = frame[roi_top:roi_bottom, roi_left:roi_right]
+        
+        # [추가] 사다리꼴 ROI 마스크 적용
+        # 직사각형 ROI 내부에서 다시 사다리꼴로 마스킹하여 상단 좌우 노이즈 제거
+        if self.config.lane_detection.roi_trapezoid_top_width_ratio < 1.0:
+            roi_h, roi_w = roi.shape[:2]
+            top_w_ratio = self.config.lane_detection.roi_trapezoid_top_width_ratio
+            top_w = int(roi_w * top_w_ratio)
+            
+            # 상단 중앙 정렬
+            top_left_x = (roi_w - top_w) // 2
+            top_right_x = top_left_x + top_w
+            
+            mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
+            pts = np.array([
+                [0, roi_h],                 # Bottom Left
+                [top_left_x, 0],            # Top Left
+                [top_right_x, 0],           # Top Right
+                [roi_w, roi_h]              # Bottom Right
+            ], dtype=np.int32)
+            
+            cv2.fillPoly(mask, [pts], 255)
+            roi = cv2.bitwise_and(roi, roi, mask=mask)
+
         # 2. 색상 기반 차선 검출
         white_mask = self._detect_white_lane(roi)
         black_mask = self._detect_black_lane(roi)
@@ -339,9 +370,12 @@ class LaneDetector:
         
         # 6. 전체 이미지 크기로 복원 (상단은 0으로 채움)
         full_binary = np.zeros((height, width), dtype=np.uint8)
-        full_binary[roi_top:roi_bottom, :] = combined
+        full_binary[roi_top:roi_bottom, roi_left:roi_right] = combined
 
         full_binary = self._apply_hood_mask(full_binary)
+        
+        # [추가] Blob Filtering (차량 등 비차선 객체 제거)
+        full_binary = self._filter_false_positives(full_binary)
 
         bottom_trim = self.config.lane_detection.bottom_trim_ratio
         if bottom_trim > 0:
@@ -706,31 +740,53 @@ class LaneDetector:
         nonzeroy = np.array(nonzero[0])
         nonzerox = np.array(nonzero[1])
         
+        left_fit = None
+        right_fit = None
+        
         # 좌측 차선 좌표 추출
+        leftx, lefty = [], []
         if len(left_lane_inds) > 0:
             leftx = nonzerox[left_lane_inds]
             lefty = nonzeroy[left_lane_inds]
-            
-            # 2차 다항식 피팅
             if len(leftx) > 0:
                 left_fit = np.polyfit(lefty, leftx, 2)
-            else:
-                left_fit = None
-        else:
-            left_fit = None
         
         # 우측 차선 좌표 추출
+        rightx, righty = [], []
         if len(right_lane_inds) > 0:
             rightx = nonzerox[right_lane_inds]
             righty = nonzeroy[right_lane_inds]
-            
-            # 2차 다항식 피팅
             if len(rightx) > 0:
                 right_fit = np.polyfit(righty, rightx, 2)
-            else:
-                right_fit = None
-        else:
-            right_fit = None
+        
+        # [추가] Joint Fitting (평행 제약 조건 적용)
+        # 양쪽 차선이 모두 검출되었고, 설정이 켜져있다면 평행하게 보정
+        if (self.config.lane_detection.enable_joint_fitting and 
+            left_fit is not None and right_fit is not None):
+            
+            # 가중치 계산 (픽셀 수가 많을수록 신뢰도 높음)
+            n_left = len(leftx)
+            n_right = len(rightx)
+            
+            if n_left > 0 and n_right > 0:
+                w_left = n_left / (n_left + n_right)
+                w_right = n_right / (n_left + n_right)
+                
+                # 곡률(a)과 기울기(b)를 가중 평균
+                avg_a = left_fit[0] * w_left + right_fit[0] * w_right
+                avg_b = left_fit[1] * w_left + right_fit[1] * w_right
+                
+                # 절편(c) 재계산: x - (ay^2 + by)의 평균
+                # 왼쪽
+                left_residuals = leftx - (avg_a * lefty**2 + avg_b * lefty)
+                new_c_left = np.mean(left_residuals)
+                
+                # 오른쪽
+                right_residuals = rightx - (avg_a * righty**2 + avg_b * righty)
+                new_c_right = np.mean(right_residuals)
+                
+                left_fit = np.array([avg_a, avg_b, new_c_left])
+                right_fit = np.array([avg_a, avg_b, new_c_right])
         
         return left_fit, right_fit
     
@@ -1063,6 +1119,50 @@ class LaneDetector:
         if old_fit is None:
             return new_fit
         return alpha * new_fit + (1 - alpha) * old_fit
+
+    def _filter_false_positives(self, binary: np.ndarray) -> np.ndarray:
+        """
+        연결된 구성 요소 분석(CCA)을 통해 차선이 아닌 객체(차량, 횡단보도 등)를 제거한다.
+        - 너비가 너무 넓은 객체 제거 (차량)
+        - 높이가 너무 낮은 객체 제거 (자잘한 노이즈)
+        - 종횡비가 가로로 긴 객체 제거
+        """
+        if not self.config.lane_detection.enable_blob_filter:
+            return binary
+            
+        # 레이블링 (8-connectivity)
+        num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        
+        # stats: [x, y, width, height, area]
+        # 배경(0)은 제외하고 처리
+        
+        min_h = self.config.lane_detection.blob_min_height
+        max_w = self.config.lane_detection.blob_max_width
+        
+        # 유효한 레이블만 마스킹
+        mask = np.zeros_like(binary)
+        
+        for i in range(1, num_labels):
+            w = stats[i, cv2.CC_STAT_WIDTH]
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            
+            # 1. 너무 넓은 물체 (차량, 횡단보도 등) 제거
+            if w > max_w:
+                continue
+                
+            # 2. 너무 납작한 물체 (가로선 노이즈) 제거
+            if h < min_h:
+                continue
+                
+            # 3. 종횡비 체크 (차선은 세로로 길거나, 점선이라도 정사각형에 가까움)
+            # 가로로 너무 긴 물체(범퍼 등) 제거
+            if h / w < 0.5:
+                continue
+                
+            # 조건 통과한 객체만 유지
+            mask[labels == i] = 255
+            
+        return mask
 
 
 # 테스트 코드

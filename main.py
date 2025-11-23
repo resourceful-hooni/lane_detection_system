@@ -368,36 +368,96 @@ class LaneDetectionSystem:
 
         roi_top_ratio = float(np.clip(lane_cfg.roi_top_ratio, 0.0, 1.0))
         roi_bottom_ratio = float(np.clip(lane_cfg.roi_bottom_ratio, 0.0, 1.0))
+        roi_left_ratio = float(np.clip(lane_cfg.roi_left_ratio, 0.0, 1.0))
+        roi_right_ratio = float(np.clip(lane_cfg.roi_right_ratio, 0.0, 1.0))
 
         roi_top = int(h * roi_top_ratio)
         roi_bottom = int(h * roi_bottom_ratio)
+        roi_left = int(w * roi_left_ratio)
+        roi_right = int(w * roi_right_ratio)
+
         if roi_bottom <= roi_top:
             roi_bottom = h
         roi_bottom = max(roi_top + 1, min(h, roi_bottom))
-        trimmed_ratio = max(0.0, (h - roi_bottom) / max(h, 1))
-
+        
+        if roi_right <= roi_left:
+            roi_right = w
+            roi_left = 0
+        
+        # 어두운 오버레이 (제외 영역 표시)
         overlay = frame.copy()
-        if trimmed_ratio > 1e-3:
+        
+        # 하단 제외 영역
+        if roi_bottom < h:
             cv2.rectangle(overlay, (0, roi_bottom), (w, h), (0, 0, 0), -1)
-            frame[:] = cv2.addWeighted(overlay, 0.35, frame, 0.65, 0)
+            
+        # 상단 제외 영역 (Top Ratio 위쪽)
+        if roi_top > 0:
+            cv2.rectangle(overlay, (0, 0), (w, roi_top), (0, 0, 0), -1)
 
-        cv2.line(frame, (0, roi_top), (w, roi_top), (0, 200, 0), 2)
-        cv2.line(frame, (0, roi_bottom), (w, roi_bottom), (0, 165, 255), 2)
+        # 좌측 제외 영역
+        if roi_left > 0:
+            cv2.rectangle(overlay, (0, 0), (roi_left, h), (0, 0, 0), -1)
+            
+        # 우측 제외 영역
+        if roi_right < w:
+            cv2.rectangle(overlay, (roi_right, 0), (w, h), (0, 0, 0), -1)
+
+        # 사다리꼴 마스크 시각화 (어두운 영역 추가)
+        trap_ratio = float(np.clip(lane_cfg.roi_trapezoid_top_width_ratio, 0.0, 1.0))
+        if trap_ratio < 1.0:
+            roi_w = roi_right - roi_left
+            roi_h = roi_bottom - roi_top
+            if roi_w > 0 and roi_h > 0:
+                top_w = int(roi_w * trap_ratio)
+                top_left_x = roi_left + (roi_w - top_w) // 2
+                top_right_x = top_left_x + top_w
+                
+                # 사다리꼴 바깥 영역(좌상단, 우상단 삼각형)을 어둡게 처리
+                # Left Triangle
+                pts_left = np.array([
+                    [roi_left, roi_top],
+                    [top_left_x, roi_top],
+                    [roi_left, roi_bottom]
+                ], dtype=np.int32)
+                cv2.fillPoly(overlay, [pts_left], (0, 0, 0))
+                
+                # Right Triangle
+                pts_right = np.array([
+                    [roi_right, roi_top],
+                    [top_right_x, roi_top],
+                    [roi_right, roi_bottom]
+                ], dtype=np.int32)
+                cv2.fillPoly(overlay, [pts_right], (0, 0, 0))
+                
+                # 사다리꼴 라인 그리기
+                cv2.line(frame, (roi_left, roi_bottom), (top_left_x, roi_top), (255, 0, 255), 2)
+                cv2.line(frame, (roi_right, roi_bottom), (top_right_x, roi_top), (255, 0, 255), 2)
+
+        # 오버레이 합성 (투명도 적용)
+        frame[:] = cv2.addWeighted(overlay, 0.35, frame, 0.65, 0)
+
+        # 경계선 그리기
+        cv2.line(frame, (0, roi_top), (w, roi_top), (0, 200, 0), 2)      # Top (Green)
+        cv2.line(frame, (0, roi_bottom), (w, roi_bottom), (0, 165, 255), 2) # Bottom (Orange)
+        cv2.line(frame, (roi_left, 0), (roi_left, h), (255, 0, 0), 2)    # Left (Blue)
+        cv2.line(frame, (roi_right, 0), (roi_right, h), (255, 0, 0), 2)  # Right (Blue)
 
         font = cv2.FONT_HERSHEY_SIMPLEX
         cv2.putText(
             frame,
-            "ROI Start",
+            "ROI Top",
             (10, max(30, roi_top + 20)),
             font,
             0.6,
             (0, 200, 0),
             2,
         )
-        if trimmed_ratio > 1e-3:
+        
+        if roi_bottom < h:
             cv2.putText(
                 frame,
-                f"Trimmed {trimmed_ratio * 100:.0f}%",
+                "ROI Bottom",
                 (10, min(h - 10, roi_bottom + 30)),
                 font,
                 0.6,

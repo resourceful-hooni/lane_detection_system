@@ -23,6 +23,13 @@ class LaneDetectionConfig:
     """차선 검출 관련 설정"""
     roi_top_ratio: float = 0.3
     roi_bottom_ratio: float = 1.0
+    roi_left_ratio: float = 0.0
+    roi_right_ratio: float = 1.0
+    roi_trapezoid_top_width_ratio: float = 1.0  # 사다리꼴 상단 너비 비율 (0.0 ~ 1.0)
+    enable_joint_fitting: bool = True  # 양쪽 차선을 평행하게 강제 맞춤 (꼬임 방지)
+    enable_blob_filter: bool = True    # 덩어리 필터링 (차량 등 비차선 객체 제거)
+    blob_min_height: int = 15          # 최소 높이 (너무 작은 점 제거)
+    blob_max_width: int = 200          # 최대 너비 (너무 넓은 물체=차량 제거)
     white_threshold: int = 200
     black_threshold: int = 100
     enable_vehicle_color_suppression: bool = True
@@ -121,9 +128,9 @@ class SlidingWindowConfig:
 @dataclass
 class PathPlanningConfig:
     lane_width_m: float = 1.0  # 트랙 차선폭 (미터). 실제 환경에 맞게 수정 필요 (예: 일반도로 3.7, 모형 1.0)
-    pid_kp: float = 0.8
-    pid_ki: float = 0.0
-    pid_kd: float = 0.1
+    pid_kp: float = 25.0       # 0.8 -> 25.0 (단위 보정: m -> deg)
+    pid_ki: float = 0.05
+    pid_kd: float = 10.0       # 0.1 -> 10.0
     max_steering_angle_deg: float = 30.0
     lookahead_distance_m: float = 10.0
     # Y축: 30m 가시거리 / 480px = 0.0625 m/px

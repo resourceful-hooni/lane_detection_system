@@ -22,6 +22,10 @@ class PathPlanner:
         self.previous_error = 0.0
         self.integral_error = 0.0
         
+        # 조향각 스무딩을 위한 변수
+        self.prev_steering_angle = 0.0
+        self.smoothing_factor = 0.2  # 0.0 ~ 1.0 (작을수록 더 부드러움/반응 느림)
+        
         # 차선 이탈 경고
         self.lane_departure_warning = False
         
@@ -104,10 +108,15 @@ class PathPlanner:
         d_term = kd * derivative_error
         
         # PID 출력
-        steering_angle = p_term + i_term + d_term
+        raw_steering_angle = p_term + i_term + d_term
         
         # 이전 오차 저장
         self.previous_error = error
+        
+        # 조향각 스무딩 (Low Pass Filter)
+        steering_angle = (self.smoothing_factor * raw_steering_angle) + \
+                         ((1 - self.smoothing_factor) * self.prev_steering_angle)
+        self.prev_steering_angle = steering_angle
         
         # 조향각 제한
         max_angle = self.config.path_planning.max_steering_angle_deg

@@ -110,15 +110,15 @@ class GUIController:
         pid_group.columnconfigure(1, weight=1)
         row += 1
         
-        self.kp_scale = self._add_slider(pid_group, 0, "Kp (비례)", 0.0, 2.0, 0.1, 
+        self.kp_scale = self._add_slider(pid_group, 0, "Kp (비례)", 0.0, 100.0, 1.0, 
                         self.config.path_planning.pid_kp,
                         lambda v: self._update_param("path_planning", "pid_kp", float(v)))
         
-        self.ki_scale = self._add_slider(pid_group, 1, "Ki (적분)", 0.0, 1.0, 0.01,
+        self.ki_scale = self._add_slider(pid_group, 1, "Ki (적분)", 0.0, 10.0, 0.01,
                         self.config.path_planning.pid_ki,
                         lambda v: self._update_param("path_planning", "pid_ki", float(v)))
         
-        self.kd_scale = self._add_slider(pid_group, 2, "Kd (미분)", 0.0, 1.0, 0.01,
+        self.kd_scale = self._add_slider(pid_group, 2, "Kd (미분)", 0.0, 50.0, 0.5,
                         self.config.path_planning.pid_kd,
                         lambda v: self._update_param("path_planning", "pid_kd", float(v)))
 
@@ -171,6 +171,34 @@ class GUIController:
         self.roi_bottom_scale = self._add_slider(roi_group, 1, "Bottom Ratio", 0.0, 1.0, 0.01,
                         self.config.lane_detection.roi_bottom_ratio,
                         lambda v: self._update_param("lane_detection", "roi_bottom_ratio", float(v)))
+
+        self.roi_left_scale = self._add_slider(roi_group, 2, "Left Ratio", 0.0, 1.0, 0.01,
+                        self.config.lane_detection.roi_left_ratio,
+                        lambda v: self._update_param("lane_detection", "roi_left_ratio", float(v)))
+
+        self.roi_right_scale = self._add_slider(roi_group, 3, "Right Ratio", 0.0, 1.0, 0.01,
+                        self.config.lane_detection.roi_right_ratio,
+                        lambda v: self._update_param("lane_detection", "roi_right_ratio", float(v)))
+
+        self.roi_trap_scale = self._add_slider(roi_group, 4, "Trap Top Width", 0.0, 1.0, 0.05,
+                        self.config.lane_detection.roi_trapezoid_top_width_ratio,
+                        lambda v: self._update_param("lane_detection", "roi_trapezoid_top_width_ratio", float(v)))
+
+        # Parallel Lock Checkbox
+        self.parallel_var = tk.BooleanVar(value=self.config.lane_detection.enable_joint_fitting)
+        ttk.Checkbutton(roi_group, text="Parallel Lock (꼬임 방지)", variable=self.parallel_var,
+                        command=lambda: self._update_param("lane_detection", "enable_joint_fitting", self.parallel_var.get())
+                        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+
+        # Blob Filter Checkbox
+        self.blob_var = tk.BooleanVar(value=self.config.lane_detection.enable_blob_filter)
+        ttk.Checkbutton(roi_group, text="Blob Filter (차량 제거)", variable=self.blob_var,
+                        command=lambda: self._update_param("lane_detection", "enable_blob_filter", self.blob_var.get())
+                        ).grid(row=6, column=0, columnspan=2, sticky="w", padx=5, pady=2)
+        
+        self.blob_width_scale = self._add_slider(roi_group, 7, "Max Blob Width", 10, 200, 5,
+                        self.config.lane_detection.blob_max_width,
+                        lambda v: self._update_param("lane_detection", "blob_max_width", int(float(v))))
 
     def _add_slider(self, parent, row, label_text, from_, to, resolution, init_val, command):
         """슬라이더 추가 헬퍼 메서드"""
@@ -357,6 +385,9 @@ class GUIController:
         
         self.roi_top_scale.set(default_lane.roi_top_ratio)
         self.roi_bottom_scale.set(default_lane.roi_bottom_ratio)
+        self.roi_left_scale.set(default_lane.roi_left_ratio)
+        self.roi_right_scale.set(default_lane.roi_right_ratio)
+        self.roi_trap_scale.set(default_lane.roi_trapezoid_top_width_ratio)
         
         print("[INFO] 파라미터가 기본값으로 리셋되었습니다.")
     
