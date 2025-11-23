@@ -1,7 +1,7 @@
 {
-  "timestamp": 1763930483.3130019,
-  "fps": 14.743083309606915,
-  "frame": 2143,
+  "timestamp": 1763930946.9307694,
+  "fps": 15.364707692420406,
+  "frame": 3104,
   "lane": {
     "detected": true,
     "gap_flags": {
@@ -12,10 +12,10 @@
   },
   "path": {
     "valid": true,
-    "center_offset": 0.01821320317685604,
-    "steering_angle": -6.824411869049072,
-    "left_curvature": 168.7817840576172,
-    "right_curvature": 168.7817840576172,
+    "center_offset": 0.03374442085623741,
+    "steering_angle": -0.353085994720459,
+    "left_curvature": 140.71371459960938,
+    "right_curvature": 140.71371459960938,
     "lane_departure_warning": false
   }
 }

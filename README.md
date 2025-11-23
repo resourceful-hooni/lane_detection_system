@@ -130,10 +130,12 @@ LabVIEW는 파일을 폴링하는 방식으로 Python 애플리케이션과 통�
 - 폴리곤을 정밀하게 따고 싶다면 `python tools\mask_calibrator.py`를 실행해 화면에서 클릭으로 꼭짓점을 지정하세요. 저장된 `calibration/hood_mask.json`은 다음 실행부터 자동으로 로드되며 정규화 좌표를 `config.py`에 수동으로 옮길 필요가 없습니다.
 - 보닛을 가렸는데도 하단이 계속 잡히면 `lane_detection.bottom_trim_ratio`를 0.05~0.15처럼 올려 프레임 하단 일정 비율을 통째로 제거할 수 있습니다.
 - 현재 시스템은 848×480 @ 60fps로 최적화되어 있습니다. 성능이 필요하면 `--frame-width`, `--frame-height`로 해상도를 조정할 수 있으며, 원근 변환 포인트는 자동으로 스케일됩니다.
-- **GUI 튜닝 가이드**:
-  - **ROI Sliders**: 상하좌우(`Top`, `Bottom`, `Left`, `Right`) 슬라이더로 관심 영역을 실시간으로 자를 수 있습니다.
-  - **Trapezoid Mask**: `Trap Top Width` 슬라이더로 ROI 상단을 사다리꼴로 좁혀 원근 왜곡 노이즈를 제거할 수 있습니다. (1.0은 비활성화)
-  - **Blob Filter**: `Blob Max Width` 슬라이더로 설정된 픽셀 너비보다 큰 객체(차량 등)를 차선 후보에서 제외합니다.
-  - **Parallel Lock**: `Joint Fitting` 체크박스를 켜면 양쪽 차선의 곡률을 강제로 평행하게 맞춰 꼬임 현상을 방지합니다.
+- **튜닝 및 파라미터 설정**:
+  - **GUI 튜닝**: 실행 중 GUI의 슬라이더와 체크박스를 통해 실시간으로 값을 조정할 수 있습니다.
+    - **ROI Sliders**: 상하좌우(`Top`, `Bottom`, `Left`, `Right`) 슬라이더로 관심 영역 설정.
+    - **Trapezoid Mask**: `Trap Top Width` 슬라이더로 ROI 상단을 사다리꼴로 좁힘 (1.0=비활성).
+    - **Blob Filter**: `Blob Max Width` 슬라이더로 차량 등 큰 객체 필터링 (기본값 80).
+    - **Parallel Lock**: `Joint Fitting` 체크박스로 양쪽 차선 평행 유지.
+  - **영구 설정 변경**: `config.py` 파일을 열어 `LaneDetectionConfig` 등의 기본값을 수정하면 다음 실행 시부터 적용됩니다.
 
 필요한 내용이 더 있으면 README를 자유롭게 확장해 주세요!

@@ -29,7 +29,7 @@ class LaneDetectionConfig:
     enable_joint_fitting: bool = True  # 양쪽 차선을 평행하게 강제 맞춤 (꼬임 방지)
     enable_blob_filter: bool = True    # 덩어리 필터링 (차량 등 비차선 객체 제거)
     blob_min_height: int = 15          # 최소 높이 (너무 작은 점 제거)
-    blob_max_width: int = 200          # 최대 너비 (너무 넓은 물체=차량 제거)
+    blob_max_width: int = 80           # 최대 너비 (너무 넓은 물체=차량 제거)
     white_threshold: int = 200
     black_threshold: int = 100
     enable_vehicle_color_suppression: bool = True
