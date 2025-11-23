@@ -1,0 +1,21 @@
+{
+  "timestamp": 1763894928.5495327,
+  "fps": 9.437533188727983,
+  "frame": 59,
+  "lane": {
+    "detected": true,
+    "gap_flags": {
+      "left": true,
+      "right": true
+    },
+    "had_gaps": true
+  },
+  "path": {
+    "valid": true,
+    "center_offset": -0.37030823521521905,
+    "steering_angle": 0.1671154770394445,
+    "left_curvature": 3626.5480993392143,
+    "right_curvature": 497.99687498538293,
+    "lane_departure_warning": true
+  }
+}

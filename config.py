@@ -1,0 +1,227 @@
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Tuple
+import numpy as np
+
+@dataclass
+class CameraConfig:
+    """카메라 관련 설정"""
+    width: int = 848
+    height: int = 480
+    fps: int = 60
+    camera_index: int = 1
+    camera_height_mm: float = 450.0
+    camera_angle_deg: float = 23.0
+    auto_exposure: bool = True
+    exposure: int = -6
+    auto_white_balance: bool = True
+
+@dataclass
+class LaneDetectionConfig:
+    """차선 검출 관련 설정"""
+    roi_top_ratio: float = 0.3
+    roi_bottom_ratio: float = 1.0
+    white_threshold: int = 200
+    black_threshold: int = 100
+    enable_vehicle_color_suppression: bool = True
+    enable_triplet_detection: bool = True
+    triplet_gradient_threshold: int = 45
+    triplet_morph_kernel: Tuple[int, int] = (9, 3)
+    canny_low_threshold: int = 50
+    canny_high_threshold: int = 100
+    gaussian_kernel_size: int = 5
+
+    # Perspective/본네트 mask 관련 값 (차선 검출 정확도 높이기 위해 추가됨)
+    lane_left_x: int = 120
+    lane_right_x: int = 728
+    horizon_y: int = 120
+    hood_bottom_y: int = 480
+    hood_top_y: int = 420
+    perspective_src_points: np.ndarray = None
+    perspective_dst_points: np.ndarray = None
+    auto_scale_perspective: bool = True
+    perspective_reference_resolution: Tuple[int, int] = (848, 480)
+    enable_hood_mask: bool = True
+    hood_mask_polygon: np.ndarray = None
+    hood_mask_path: str = "calibration/hood_mask.json"
+    bottom_trim_ratio: float = 0.0
+
+    def __post_init__(self):
+        # Perspective 포인트 및 본네트 polygon 초기화
+        if self.perspective_src_points is None:
+            # 사다리꼴 형태의 소스 포인트 (원근 효과 보정)
+            # 848x480 해상도 기준, 중앙 정렬 가정
+            img_w, img_h = 848, 480
+            center_x = img_w // 2
+            
+            # 하단: 보닛 바로 앞 (차선 너비 + 여유)
+            # lane_left_x(120) ~ lane_right_x(728) -> 폭 608
+            bottom_width = self.lane_right_x - self.lane_left_x
+            
+            # 상단: 소실점 근처 (원근감으로 인해 좁아짐)
+            # 보통 하단 폭의 20~40% 정도로 설정
+            top_width = int(bottom_width * 0.35)
+            
+            self.perspective_src_points = np.float32([
+                [center_x - top_width // 2, self.horizon_y],      # Top Left
+                [center_x + top_width // 2, self.horizon_y],      # Top Right
+                [center_x + bottom_width // 2, self.hood_bottom_y], # Bottom Right
+                [center_x - bottom_width // 2, self.hood_bottom_y], # Bottom Left
+            ])
+            
+            # Destination: Bird's Eye View (직사각형)
+            # 이미지 좌우에 여백을 두어 차선이 휘어질 공간 확보
+            margin_x = 150
+            self.perspective_dst_points = np.float32([
+                [margin_x, 0],
+                [img_w - margin_x, 0],
+                [img_w - margin_x, img_h],
+                [margin_x, img_h]
+            ])
+            
+        if self.hood_mask_polygon is None:
+            px = [
+                [292,716],[305,655],[311,615],[324,579],[337,555],[354,534],[370,517],[384,502],
+                [401,484],[422,468],[438,455],[457,450],[476,442],[497,436],[510,431],[536,428],
+                [549,423],[566,420],[586,421],[606,421],[627,419],[645,420],[665,419],[681,422],
+                [695,424],[714,428],[734,435],[751,439],[765,443],[786,450],[800,457],[818,463],
+                [835,475],[849,489],[857,503],[866,515],[877,520],[890,530],[896,543],[906,555],
+                [917,575],[933,607],[939,635],[937,654],[945,685],[949,718]
+            ]
+            # 1280x720 polygon을 848x480 환경에 맞게 정규화
+            width_, height_ = 1280, 720
+            self.hood_mask_polygon = np.float32([[x/width_, y/height_] for x, y in px])
+        self._load_hood_mask_from_file()
+
+    def _load_hood_mask_from_file(self):
+        if not self.enable_hood_mask or not self.hood_mask_path:
+            return
+        path = Path(self.hood_mask_path)
+        if not path.exists():
+            return
+        try:
+            with path.open("r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            polygon = data.get("polygon_normalized")
+            if polygon and len(polygon) >= 3:
+                self.hood_mask_polygon = np.float32(polygon)
+                print(f"[INFO] Hood mask loaded from {path}")
+        except Exception as exc:
+            print(f"[WARN] Failed to load hood mask from {path}: {exc}")
+
+@dataclass
+class SlidingWindowConfig:
+    n_windows: int = 12
+    margin: int = 60
+    min_pixels: int = 50
+    histogram_start_ratio: float = 0.0
+
+@dataclass
+class PathPlanningConfig:
+    lane_width_m: float = 1.0  # 트랙 차선폭 (미터). 실제 환경에 맞게 수정 필요 (예: 일반도로 3.7, 모형 1.0)
+    pid_kp: float = 0.8
+    pid_ki: float = 0.0
+    pid_kd: float = 0.1
+    max_steering_angle_deg: float = 30.0
+    lookahead_distance_m: float = 10.0
+    # Y축: 30m 가시거리 / 480px = 0.0625 m/px
+    ym_per_pix: float = 30.0 / 480
+    # X축: 차선폭(1.0m) / BEV차선폭(약 550px) = 0.0018 m/px
+    # BEV 폭 = 848 - (150*2) = 548px
+    xm_per_pix: float = 1.0 / 548
+
+@dataclass
+class GUIConfig:
+    window_title: str = "Lane Detection System - 자율주행 차선 인식"
+    display_width: int = 1280
+    display_height: int = 720
+    update_interval_ms: int = 16
+    font_scale: float = 0.6
+    font_thickness: int = 2
+    color_left_lane: Tuple[int, int, int] = (255, 0, 0)
+    color_right_lane: Tuple[int, int, int] = (0, 0, 255)
+    color_center_line: Tuple[int, int, int] = (0, 255, 0)
+    color_text: Tuple[int, int, int] = (255, 255, 255)
+    color_warning: Tuple[int, int, int] = (0, 255, 255)
+
+@dataclass
+class LoggingConfig:
+    log_dir: str = "logs"
+    video_dir: str = "videos"
+    save_video: bool = True
+    video_codec: str = "XVID"
+    video_extension: str = ".avi"
+    video_fps: int = 30
+    save_csv: bool = True
+    csv_columns: list = None
+    def __post_init__(self):
+        if self.csv_columns is None:
+            self.csv_columns = [
+                "timestamp", "frame_number", "left_curve_rad", "right_curve_rad",
+                "center_offset_m", "steering_angle_deg", "lane_detected", "fps",
+                "white_threshold", "canny_low", "canny_high",
+                "roi_top", "roi_bottom", "pixel_min_y", "pixel_max_y", "pixel_mean_y"
+            ]
+        os.makedirs(self.log_dir, exist_ok=True)
+        os.makedirs(self.video_dir, exist_ok=True)
+
+@dataclass
+class SystemConfig:
+    camera: CameraConfig = None
+    lane_detection: LaneDetectionConfig = None
+    sliding_window: SlidingWindowConfig = None
+    path_planning: PathPlanningConfig = None
+    gui: GUIConfig = None
+    logging: LoggingConfig = None
+    def __post_init__(self):
+        if self.camera is None:
+            self.camera = CameraConfig()
+        if self.lane_detection is None:
+            self.lane_detection = LaneDetectionConfig()
+        if self.sliding_window is None:
+            self.sliding_window = SlidingWindowConfig()
+        if self.path_planning is None:
+            self.path_planning = PathPlanningConfig()
+        if self.gui is None:
+            self.gui = GUIConfig()
+        if self.logging is None:
+            self.logging = LoggingConfig()
+
+# 전역 설정 인스턴스
+config = SystemConfig()
+
+def get_config() -> SystemConfig:
+    return config
+
+def update_config(section: str, param: str, value):
+    global config
+    if hasattr(config, section):
+        section_obj = getattr(config, section)
+        if hasattr(section_obj, param):
+            setattr(section_obj, param, value)
+            print(f"[INFO] 파라미터 변경: {section}.{param} = {value}")
+            return True
+    return False
+
+if __name__ == "__main__":
+    cfg = get_config()
+    print("=== 카메라 설정 ===")
+    print(f"해상도: {cfg.camera.width}x{cfg.camera.height}")
+    print(f"FPS: {cfg.camera.fps}")
+    print(f"카메라 높이: {cfg.camera.camera_height_mm}mm")
+    print(f"카메라 각도: {cfg.camera.camera_angle_deg}도")
+    print("\n=== 차선 검출 설정 ===")
+    print(f"ROI: 상단 {cfg.lane_detection.roi_top_ratio*100:.0f}% ~ 하단 {cfg.lane_detection.roi_bottom_ratio*100:.0f}%")
+    print(f"사용 영역: {int(cfg.camera.height * cfg.lane_detection.roi_bottom_ratio)}픽셀")
+    print(f"흰색 임계값: {cfg.lane_detection.white_threshold}")
+    print(f"Canny 임계값: {cfg.lane_detection.canny_low_threshold}-{cfg.lane_detection.canny_high_threshold}")
+    print("\n=== 경로 계획 설정 ===")
+    print(f"PID 게인: Kp={cfg.path_planning.pid_kp}, Ki={cfg.path_planning.pid_ki}, Kd={cfg.path_planning.pid_kd}")
+    print(f"최대 조향각: {cfg.path_planning.max_steering_angle_deg}도")
+    print(f"픽셀-미터 변환: Y={cfg.path_planning.ym_per_pix:.6f}, X={cfg.path_planning.xm_per_pix:.6f}")
+    print("\n=== 로깅 설정 ===")
+    print(f"영상 저장: {cfg.logging.save_video}")
+    print(f"CSV 저장: {cfg.logging.save_csv}")
+    print(f"로그 디렉토리: {cfg.logging.log_dir}")
