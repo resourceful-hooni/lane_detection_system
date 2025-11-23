@@ -14,7 +14,7 @@
 ## 🧱 기술 스택
 - **언어**: Python 3.12
 - **핵심 라이브러리**: OpenCV, NumPy, Pillow, Tkinter, csv
-- **하드웨어**: Logitech BRIO VU0040 (1280×720 @ 60fps 기준 튜닝)
+- **하드웨어**: Logitech BRIO VU0040 (848×480 @ 60fps 기준 튜닝)
 - **운영체제**: Windows 10/11 (DirectShow 우선 백엔드)
 
 ## 📁 디렉터리 개요
@@ -126,6 +126,6 @@ LabVIEW는 파일을 폴링하는 방식으로 Python 애플리케이션과 통�
 - 흰-검-흰 패턴 테이프를 쓰는 경우 `lane_detection.enable_triplet_detection`과 관련 임계값(`triplet_gradient_threshold`, `triplet_morph_kernel`)을 조정하면 에지 기반 마스크가 생성되어 검출이 더 안정적입니다.
 - 폴리곤을 정밀하게 따고 싶다면 `python tools\mask_calibrator.py`를 실행해 화면에서 클릭으로 꼭짓점을 지정하세요. 저장된 `calibration/hood_mask.json`은 다음 실행부터 자동으로 로드되며 정규화 좌표를 `config.py`에 수동으로 옮길 필요가 없습니다.
 - 보닛을 가렸는데도 하단이 계속 잡히면 `lane_detection.bottom_trim_ratio`를 0.05~0.15처럼 올려 프레임 하단 일정 비율을 통째로 제거할 수 있습니다.
-- 성능이 부족하면 해상도를 1280×720 → 960×540(약 56%) 또는 848×480(약 44%)으로 낮춰 보세요. `--frame-width`, `--frame-height`로 즉시 변경할 수 있으며, 원근 변환 포인트는 자동으로 스케일됩니다.
+- 현재 시스템은 848×480 @ 60fps로 최적화되어 있습니다. 성능이 필요하면 `--frame-width`, `--frame-height`로 해상도를 조정할 수 있으며, 원근 변환 포인트는 자동으로 스케일됩니다.
 
 필요한 내용이 더 있으면 README를 자유롭게 확장해 주세요!
