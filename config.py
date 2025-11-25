@@ -140,6 +140,16 @@ class SlidingWindowConfig:
     histogram_start_ratio: float = 0.0
 
 @dataclass
+class RowAnchorConfig:
+    """[Task 6] Row-Anchor Detection 설정"""
+    enabled: bool = True        # Row-Anchor 사용 여부 (True: Row-Anchor, False: Sliding Window)
+    num_rows: int = 36          # 샘플링 row 개수 (72보다 36이 2배 빠름)
+    search_range: int = 50      # anchor 기준 탐색 범위 (±픽셀)
+    min_pixels: int = 10        # row당 최소 픽셀 수
+    min_points_for_fit: int = 10  # 다항식 피팅에 필요한 최소 포인트 수
+    fallback_to_sliding: bool = True  # Row-Anchor 실패 시 Sliding Window로 fallback
+
+@dataclass
 class PathPlanningConfig:
     lane_width_m: float = 1.0  # 트랙 차선폭 (미터). 실제 환경에 맞게 수정 필요 (예: 일반도로 3.7, 모형 1.0)
     pid_kp: float = 25.0       # 0.8 -> 25.0 (단위 보정: m -> deg)
@@ -194,6 +204,7 @@ class SystemConfig:
     camera: CameraConfig = None
     lane_detection: LaneDetectionConfig = None
     sliding_window: SlidingWindowConfig = None
+    row_anchor: RowAnchorConfig = None  # [Task 6] Row-Anchor 설정 추가
     path_planning: PathPlanningConfig = None
     gui: GUIConfig = None
     logging: LoggingConfig = None
@@ -204,6 +215,8 @@ class SystemConfig:
             self.lane_detection = LaneDetectionConfig()
         if self.sliding_window is None:
             self.sliding_window = SlidingWindowConfig()
+        if self.row_anchor is None:
+            self.row_anchor = RowAnchorConfig()  # [Task 6]
         if self.path_planning is None:
             self.path_planning = PathPlanningConfig()
         if self.gui is None:

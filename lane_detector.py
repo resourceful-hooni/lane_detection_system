@@ -532,6 +532,147 @@ class LaneDetector:
         
         return warped
     
+
+    # =========================================================================
+    # [Task 6] Row-Anchor Detection (Ultra-Fast-Lane-Detection 개념)
+    # =========================================================================
+    def detect_lanes_row_anchor(
+        self, 
+        binary_warped: np.ndarray,
+        visualize: bool = True
+    ) -> Tuple[Optional[np.ndarray], np.ndarray, np.ndarray]:
+        """
+        Row-Anchor 기반 차선 검출 (Ultra-Fast-Lane-Detection 개념)
+        
+        Sliding Window보다 2~3배 빠름 - 고정된 row에서만 탐색
+        
+        Args:
+            binary_warped: BEV 변환된 이진 이미지
+            visualize: 시각화 이미지 생성 여부
+        
+        Returns:
+            out_img: 시각화 이미지 (visualize=True일 때)
+            left_lane_inds: 좌측 차선 픽셀 인덱스
+            right_lane_inds: 우측 차선 픽셀 인덱스
+        """
+        height, width = binary_warped.shape
+        num_rows = self.config.row_anchor.num_rows  # 기본 36
+        row_height = height // num_rows
+        search_range = self.config.row_anchor.search_range  # 기본 50
+        min_pixels_per_row = self.config.row_anchor.min_pixels  # 기본 10
+        
+        # 시각화용 컬러 이미지
+        out_img = None
+        if visualize:
+            out_img = np.dstack((binary_warped, binary_warped, binary_warped)) * 255
+        
+        # Anchor 초기화 (Hood Mask 기준)
+        if self.hood_warped_left_x is not None:
+            anchor_left = self.hood_warped_left_x
+            anchor_right = self.hood_warped_right_x
+        else:
+            anchor_left = width // 4
+            anchor_right = width * 3 // 4
+        
+        # 모든 nonzero 픽셀 추출 (한 번만)
+        nonzero = binary_warped.nonzero()
+        nonzeroy = np.array(nonzero[0])
+        nonzerox = np.array(nonzero[1])
+        
+        left_lane_inds = []
+        right_lane_inds = []
+        
+        left_points = []
+        right_points = []
+        
+        # 각 row를 하단에서 상단으로 순회
+        for i in range(num_rows - 1, -1, -1):
+            y_top = i * row_height
+            y_bottom = min((i + 1) * row_height, height)
+            y_center = (y_top + y_bottom) // 2
+            
+            # 좌측 차선 탐색
+            left_x, left_inds = self._find_lane_in_row_fast(
+                nonzerox, nonzeroy,
+                y_top, y_bottom,
+                anchor_left, search_range,
+                min_pixels_per_row
+            )
+            if left_x is not None:
+                left_points.append((left_x, y_center))
+                left_lane_inds.extend(left_inds)
+                anchor_left = left_x  # Update anchor for next row
+                
+                if visualize and out_img is not None:
+                    # 검출 영역 표시 (녹색)
+                    cv2.circle(out_img, (int(left_x), y_center), 5, (0, 255, 0), -1)
+            
+            # 우측 차선 탐색
+            right_x, right_inds = self._find_lane_in_row_fast(
+                nonzerox, nonzeroy,
+                y_top, y_bottom,
+                anchor_right, search_range,
+                min_pixels_per_row
+            )
+            if right_x is not None:
+                right_points.append((right_x, y_center))
+                right_lane_inds.extend(right_inds)
+                anchor_right = right_x  # Update anchor for next row
+                
+                if visualize and out_img is not None:
+                    # 검출 영역 표시 (파란색)
+                    cv2.circle(out_img, (int(right_x), y_center), 5, (255, 0, 0), -1)
+        
+        # numpy 배열로 변환
+        left_lane_inds = np.array(left_lane_inds, dtype=np.int32) if left_lane_inds else np.array([], dtype=np.int32)
+        right_lane_inds = np.array(right_lane_inds, dtype=np.int32) if right_lane_inds else np.array([], dtype=np.int32)
+        
+        return out_img, left_lane_inds, right_lane_inds
+    
+    def _find_lane_in_row_fast(
+        self,
+        nonzerox: np.ndarray,
+        nonzeroy: np.ndarray,
+        y_top: int,
+        y_bottom: int,
+        anchor_x: int,
+        search_range: int,
+        min_pixels: int
+    ) -> Tuple[Optional[float], List[int]]:
+        """
+        특정 row에서 anchor 근처 차선 픽셀 찾기 (빠른 버전)
+        
+        Args:
+            nonzerox, nonzeroy: 전체 nonzero 픽셀 좌표
+            y_top, y_bottom: row 범위
+            anchor_x: 탐색 시작 위치
+            search_range: 탐색 범위 (±픽셀)
+            min_pixels: 최소 픽셀 수
+        
+        Returns:
+            peak_x: 검출된 x 좌표 (없으면 None)
+            good_inds: 해당 픽셀 인덱스 리스트
+        """
+        x_min = max(0, anchor_x - search_range)
+        x_max = anchor_x + search_range
+        
+        # y범위와 x범위 내 픽셀 찾기
+        good_inds = (
+            (nonzeroy >= y_top) & 
+            (nonzeroy < y_bottom) &
+            (nonzerox >= x_min) &
+            (nonzerox < x_max)
+        )
+        
+        good_inds_idx = np.where(good_inds)[0].tolist()
+        
+        if len(good_inds_idx) >= min_pixels:
+            # 검출된 픽셀들의 평균 x 좌표
+            peak_x = np.mean(nonzerox[good_inds])
+            return peak_x, good_inds_idx
+        else:
+            return None, []
+
     def find_lane_pixels_sliding_window(
         self, 
         binary_warped: np.ndarray,
@@ -845,8 +986,24 @@ class LaneDetector:
                 if visualize:
                     out_img = _img
         else:
-            _img, left_lane_inds, right_lane_inds = \
-                self.find_lane_pixels_sliding_window(binary_warped, visualize=visualize)
+
+            # [Task 6] Row-Anchor 또는 Sliding Window 선택
+            if self.config.row_anchor.enabled:
+                # Row-Anchor Detection 사용 (2~3배 빠름)
+                _img, left_lane_inds, right_lane_inds = \
+                    self.detect_lanes_row_anchor(binary_warped, visualize=visualize)
+                
+                # Fallback: Row-Anchor 결과가 부족하면 Sliding Window로 전환
+                min_points = self.config.row_anchor.min_points_for_fit
+                if self.config.row_anchor.fallback_to_sliding:
+                    if len(left_lane_inds) < min_points * 5 or len(right_lane_inds) < min_points * 5:
+                        _img, left_lane_inds, right_lane_inds = \
+                            self.find_lane_pixels_sliding_window(binary_warped, visualize=visualize)
+            else:
+                # 기존 Sliding Window 사용
+                _img, left_lane_inds, right_lane_inds = \
+                    self.find_lane_pixels_sliding_window(binary_warped, visualize=visualize)
+
             if visualize:
                 out_img = _img
         
