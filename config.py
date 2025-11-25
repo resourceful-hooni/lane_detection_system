@@ -41,6 +41,11 @@ class LaneDetectionConfig:
     black_threshold: int = 100
     enable_vehicle_color_suppression: bool = True
     enable_triplet_detection: bool = True
+    
+    # [complete-fix-guide] 추가 파라미터
+    use_row_anchor: bool = True  # Row-Anchor Detection 사용
+    line_iou_threshold: float = 0.5  # Line IoU 임계값
+    enable_strict_validation: bool = True  # 엄격한 기하학적 검증
     triplet_gradient_threshold: int = 45
     triplet_morph_kernel: Tuple[int, int] = (9, 3)
     canny_low_threshold: int = 50

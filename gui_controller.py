@@ -426,3 +426,143 @@ if __name__ == "__main__":
             gui.update()
     except KeyboardInterrupt:
         pass
+
+    def setup_debug_windows(self):
+        """디버깅 창 초기화"""
+        cv2.namedWindow("1. Combined Binary", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("1. Combined Binary", 640, 360)
+        
+        cv2.namedWindow("2. Binary Warped (BEV)", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("2. Binary Warped (BEV)", 640, 360)
+        
+        cv2.namedWindow("3. Histogram", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("3. Histogram", 800, 300)
+        
+        cv2.namedWindow("4. Detection", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("4. Detection", 640, 360)
+        
+        cv2.namedWindow("5. Color Masks", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("5. Color Masks", 640, 360)
+        
+        self.debug_windows_enabled = True
+        print("[GUI] Debug windows created")
+    
+    def close_debug_windows(self):
+        """디버깅 창 닫기"""
+        for name in ["1. Combined Binary", "2. Binary Warped (BEV)", 
+                     "3. Histogram", "4. Detection", "5. Color Masks"]:
+            try:
+                cv2.destroyWindow(name)
+            except:
+                pass
+        self.debug_windows_enabled = False
+    
+    def update_debug_windows(self, result: dict):
+        """디버깅 정보 실시간 업데이트"""
+        if not hasattr(self, 'debug_windows_enabled') or not self.debug_windows_enabled:
+            return
+        
+        # 1. Combined Binary
+        if 'preprocess_debug' in result and 'combined_binary' in result['preprocess_debug']:
+            cv2.imshow("1. Combined Binary", result['preprocess_debug']['combined_binary'])
+        
+        # 2. Binary Warped
+        if 'binary_warped' in result:
+            cv2.imshow("2. Binary Warped (BEV)", result['binary_warped'])
+        
+        # 3. Histogram
+        if 'binary_warped' in result:
+            binary_warped = result['binary_warped']
+            histogram = np.sum(binary_warped[binary_warped.shape[0]//2:, :], axis=0)
+            hist_img = self.draw_histogram_graph(histogram)
+            cv2.imshow("3. Histogram", hist_img)
+        
+        # 4. Detection (sliding window visualization)
+        if 'out_img' in result:
+            cv2.imshow("4. Detection", result['out_img'].astype(np.uint8))
+        
+        # 5. Color Masks
+        if 'preprocess_debug' in result:
+            debug = result['preprocess_debug']
+            if 'white_combined' in debug and 'yellow_combined' in debug:
+                white = debug['white_combined']
+                yellow = debug['yellow_combined']
+                
+                # 3채널로 변환
+                h, w = white.shape
+                color_masks = np.zeros((h, w, 3), dtype=np.uint8)
+                color_masks[white > 0] = [255, 255, 255]  # 흰색
+                color_masks[yellow > 0] = [0, 255, 255]   # 노랑
+                
+                cv2.imshow("5. Color Masks", color_masks)
+    
+    def draw_histogram_graph(self, histogram: np.ndarray) -> np.ndarray:
+        """히스토그램 그래프 그리기"""
+        hist_height = 300
+        hist_width = len(histogram)
+        hist_img = np.zeros((hist_height, hist_width, 3), dtype=np.uint8)
+        
+        # 정규화
+        if np.max(histogram) > 0:
+            norm_hist = histogram / np.max(histogram) * (hist_height - 10)
+        else:
+            norm_hist = np.zeros_like(histogram)
+        
+        # 히스토그램 그리기
+        for i in range(len(histogram)):
+            cv2.line(hist_img,
+                     (i, hist_height),
+                     (i, hist_height - int(norm_hist[i])),
+                     (255, 255, 255), 1)
+        
+        # 중앙선
+        midpoint = hist_width // 2
+        cv2.line(hist_img, (midpoint, 0), (midpoint, hist_height), (0, 255, 0), 2)
+        
+        # Hood bounds 표시
+        # (optional: 나중에 추가)
+        
+        return hist_img
+    
+    def draw_debug_overlay(self, frame: np.ndarray, result: dict) -> np.ndarray:
+        """프레임에 디버깅 정보 오버레이"""
+        frame = frame.copy()
+        
+        # 검출 상태
+        if result.get('detected', False):
+            status_text = "DETECTED"
+            status_color = (0, 255, 0)
+        else:
+            reason = result.get('validation_reason', 'unknown')
+            status_text = f"LOST: {reason}"
+            status_color = (0, 0, 255)
+        
+        cv2.putText(frame, status_text, (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, status_color, 2)
+        
+        # FPS
+        if hasattr(self, 'current_fps'):
+            cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        
+        # Line IoU (있으면)
+        if 'line_iou_left' in result:
+            iou_text = f"IoU L:{result['line_iou_left']:.2f} R:{result['line_iou_right']:.2f}"
+            cv2.putText(frame, iou_text, (10, 90),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+        
+        # Lane Width 학습 상태
+        if 'lane_width_learning_complete' in result:
+            if result['lane_width_learning_complete']:
+                width_text = f"Width: {result.get('avg_lane_width', 0):.0f}px (Learned)"
+                width_color = (0, 255, 0)
+            else:
+                history_len = len(result.get('lane_width_history', []))
+                width_text = f"Width: Learning... ({history_len}/30)"
+                width_color = (0, 255, 255)
+            
+            cv2.putText(frame, width_text, (10, 120),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, width_color, 2)
+        
+        return frame
+

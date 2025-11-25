@@ -113,6 +113,13 @@ class LaneDetector:
         
         # 학습된 차선 폭
         self.avg_lane_width = 548.0
+        
+        # [Task 2-3] 차선 폭 학습 버퍼
+        self.lane_width_history = []
+        self.lane_width_learning_complete = False
+        
+        # [Task 1-1] 마지막 전처리 디버그 정보
+        self._last_preprocess_debug = {}
 
         self._last_roi_bounds: Tuple[int, int, int] = (0, self.config.camera.height, self.config.camera.height)
         
@@ -265,142 +272,163 @@ class LaneDetector:
 
         return cv2.bitwise_and(binary, self.hood_mask)
     
-    def preprocess_frame(self, frame: np.ndarray) -> np.ndarray:
+    def preprocess_frame(self, frame: np.ndarray) -> Tuple[np.ndarray, dict]:
         """
-        프레임 전처리
+        정교한 차선 검출을 위한 복합 알고리즘
+        HLS + LAB + Sobel + Adaptive + Canny 5개 알고리즘 복합
         
-        Args:
-            frame: 입력 프레임 (BGR)
-            
         Returns:
-            전처리된 이진화 이미지
+            full_binary: 최종 이진 마스크
+            debug_info: 디버깅용 중간 결과
         """
-        # 1. ROI 설정 (관심 영역만 추출)
+        debug_info = {'original': frame.copy()}
+        
+        # 1. ROI 설정
         height, width = frame.shape[:2]
         
-        # [User Request] 초반에는 ROI Top을 0.6으로 설정하여 가까운 곳만 보다가(안정화),
-        # 일정 프레임(60) 이후 0.3으로 변경하여 먼 곳까지 보도록 함
         if self.frame_count < 60:
             roi_top_ratio = 0.6
         else:
-            roi_top_ratio = 0.3
+            roi_top_ratio = self.config.lane_detection.roi_top_ratio
             
-        # roi_top_ratio = np.clip(self.config.lane_detection.roi_top_ratio, 0.0, 1.0)
         roi_bottom_ratio = np.clip(self.config.lane_detection.roi_bottom_ratio, 0.0, 1.0)
         roi_left_ratio = np.clip(self.config.lane_detection.roi_left_ratio, 0.0, 1.0)
         roi_right_ratio = np.clip(self.config.lane_detection.roi_right_ratio, 0.0, 1.0)
-
+        
         roi_top = int(height * roi_top_ratio)
         roi_bottom = int(height * roi_bottom_ratio)
         roi_left = int(width * roi_left_ratio)
         roi_right = int(width * roi_right_ratio)
-
+        
         if roi_bottom <= roi_top:
             roi_bottom = height
-        
         if roi_right <= roi_left:
             roi_right = width
             roi_left = 0
-        
+            
         self._last_roi_bounds = (roi_top, roi_bottom, height)
         roi = frame[roi_top:roi_bottom, roi_left:roi_right]
+        debug_info['roi'] = roi.copy()
         
-        # [추가] 사다리꼴 ROI 마스크 적용
-        # 직사각형 ROI 내부에서 다시 사다리꼴로 마스킹하여 상단 좌우 노이즈 제거
+        # 사다리꼴 ROI
         if self.config.lane_detection.roi_trapezoid_top_width_ratio < 1.0:
             roi_h, roi_w = roi.shape[:2]
             top_w_ratio = self.config.lane_detection.roi_trapezoid_top_width_ratio
             top_w = int(roi_w * top_w_ratio)
-            
-            # 상단 중앙 정렬
             top_left_x = (roi_w - top_w) // 2
             top_right_x = top_left_x + top_w
-            
             mask = np.zeros((roi_h, roi_w), dtype=np.uint8)
-            pts = np.array([
-                [0, roi_h],                 # Bottom Left
-                [top_left_x, 0],            # Top Left
-                [top_right_x, 0],           # Top Right
-                [roi_w, roi_h]              # Bottom Right
-            ], dtype=np.int32)
-            
+            pts = np.array([[0, roi_h], [top_left_x, 0], [top_right_x, 0], [roi_w, roi_h]], dtype=np.int32)
             cv2.fillPoly(mask, [pts], 255)
             roi = cv2.bitwise_and(roi, roi, mask=mask)
-
-        # 2. 색상 기반 차선 검출
-        white_mask = self._detect_white_lane(roi)
-        black_mask = self._detect_black_lane(roi)
-        if self.config.lane_detection.enable_vehicle_color_suppression:
-            vehicle_mask = self._suppress_vehicle_colors(roi)
-        else:
-            vehicle_mask = np.full_like(white_mask, 255)
         
-        # 3. 마스크 결합 (흰색 또는 검정색)
-        combined_mask = cv2.bitwise_or(white_mask, black_mask)
-        combined_mask = cv2.bitwise_and(combined_mask, vehicle_mask)
+        # === 2. HLS Color Space ===
+        hls = cv2.cvtColor(roi, cv2.COLOR_BGR2HLS)
+        h_channel = hls[:, :, 0]
+        l_channel = hls[:, :, 1]
+        s_channel = hls[:, :, 2]
         
-        # 4. Canny Edge Detection
+        white_mask_hls = cv2.inRange(l_channel, 200, 255)
+        yellow_hue_mask = cv2.inRange(h_channel, 15, 35)
+        yellow_sat_mask = cv2.inRange(s_channel, 80, 255)
+        yellow_mask_hls = cv2.bitwise_and(yellow_hue_mask, yellow_sat_mask)
+        
+        debug_info['white_mask_hls'] = white_mask_hls
+        debug_info['yellow_mask_hls'] = yellow_mask_hls
+        
+        # === 3. LAB Color Space ===
+        lab = cv2.cvtColor(roi, cv2.COLOR_BGR2LAB)
+        l_lab = lab[:, :, 0]
+        b_channel = lab[:, :, 2]
+        
+        yellow_mask_lab = cv2.inRange(b_channel, 145, 200)
+        white_mask_lab = cv2.inRange(l_lab, 200, 255)
+        
+        debug_info['yellow_mask_lab'] = yellow_mask_lab
+        debug_info['white_mask_lab'] = white_mask_lab
+        
+        # === 4. CLAHE + Adaptive Threshold ===
         gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        enhanced_gray = clahe.apply(gray)
         
-        # [추가] Top-Hat 변환으로 검-흰-검 패턴(밝은 선) 강조
-        # 차선 폭보다 약간 큰 커널을 사용하여 밝은 선만 추출
+        adaptive_white = cv2.adaptiveThreshold(
+            enhanced_gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, blockSize=21, C=-3
+        )
+        debug_info['adaptive_white'] = adaptive_white
+        
+        # === 5. Sobel Edge ===
+        sobelx = cv2.Sobel(enhanced_gray, cv2.CV_64F, 1, 0, ksize=3)
+        abs_sobelx = np.abs(sobelx)
+        if np.max(abs_sobelx) > 0:
+            scaled_sobelx = np.uint8(255 * abs_sobelx / np.max(abs_sobelx))
+        else:
+            scaled_sobelx = np.zeros_like(gray)
+        sobel_mask = cv2.inRange(scaled_sobelx, 30, 255)
+        debug_info['sobel_mask'] = sobel_mask
+        
+        # === 6. Canny Edge ===
+        blurred = cv2.GaussianBlur(enhanced_gray, (5, 5), 0)
+        canny_edges = cv2.Canny(blurred, 50, 150)
+        debug_info['canny_edges'] = canny_edges
+        
+        # === 7. Top-Hat Transform ===
         tophat_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
         tophat = cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, tophat_kernel)
         _, tophat_mask = cv2.threshold(tophat, 30, 255, cv2.THRESH_BINARY)
+        debug_info['tophat_mask'] = tophat_mask
         
-        blurred = cv2.GaussianBlur(
-            gray, 
-            (self.config.lane_detection.gaussian_kernel_size, 
-             self.config.lane_detection.gaussian_kernel_size), 
-            0
-        )
-        edges = cv2.Canny(
-            blurred,
-            self.config.lane_detection.canny_low_threshold,
-            self.config.lane_detection.canny_high_threshold
-        )
-        triplet_mask = np.zeros_like(white_mask)
-        if self.config.lane_detection.enable_triplet_detection:
-            triplet_mask = self._detect_white_black_white_pattern(roi)
+        # === 8. 복합 결합 ===
+        white_combined = cv2.bitwise_or(white_mask_hls, white_mask_lab)
+        white_combined = cv2.bitwise_or(white_combined, adaptive_white)
+        yellow_combined = cv2.bitwise_or(yellow_mask_hls, yellow_mask_lab)
         
-        # 5. 색상 마스크와 에지 결합
-        combined = cv2.bitwise_or(combined_mask, edges)
-        combined = cv2.bitwise_or(combined, triplet_mask)
-        combined = cv2.bitwise_or(combined, tophat_mask)  # Top-Hat 결과 추가
+        color_mask = cv2.bitwise_or(white_combined, yellow_combined)
+        edge_mask = cv2.bitwise_or(sobel_mask, canny_edges)
+        edge_mask = cv2.bitwise_or(edge_mask, tophat_mask)
         
-        # 6. 전체 이미지 크기로 복원 (상단은 0으로 채움)
+        combined_binary = cv2.bitwise_or(color_mask, edge_mask)
+        
+        debug_info['white_combined'] = white_combined
+        debug_info['yellow_combined'] = yellow_combined
+        debug_info['color_mask'] = color_mask
+        debug_info['edge_mask'] = edge_mask
+        debug_info['combined_binary'] = combined_binary
+        
+        # === 9. Morphology 노이즈 제거 ===
+        kernel_open = np.ones((3, 3), np.uint8)
+        kernel_close = np.ones((5, 5), np.uint8)
+        cleaned = cv2.morphologyEx(combined_binary, cv2.MORPH_OPEN, kernel_open)
+        cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel_close)
+        
+        # === 10. 전체 이미지로 복원 ===
         full_binary = np.zeros((height, width), dtype=np.uint8)
-        full_binary[roi_top:roi_bottom, roi_left:roi_right] = combined
-
+        full_binary[roi_top:roi_bottom, roi_left:roi_right] = cleaned
         full_binary = self._apply_hood_mask(full_binary)
-        
-        # [추가] Blob Filtering (차량 등 비차선 객체 제거)
         full_binary = self._filter_false_positives(full_binary)
-
+        
         bottom_trim = self.config.lane_detection.bottom_trim_ratio
         if bottom_trim > 0:
             trim_pixels = int(height * bottom_trim)
             if trim_pixels > 0:
                 full_binary[-trim_pixels:, :] = 0
-
-        # --- 분석: Y축 픽셀 분포 (Mask Y-axis Histogram) ---
-        # 흰색 픽셀(255)의 Y좌표 분포 확인
-        nonzero_y, nonzero_x = full_binary.nonzero()
         
+        # Y축 픽셀 통계
+        nonzero_y, _ = full_binary.nonzero()
         if len(nonzero_y) > 0:
-            min_y = np.min(nonzero_y)
-            max_y = np.max(nonzero_y)
-            mean_y = np.mean(nonzero_y)
-            
             self.pixel_stats = {
-                'min_y': int(min_y),
-                'max_y': int(max_y),
-                'mean_y': float(mean_y)
+                'min_y': int(np.min(nonzero_y)),
+                'max_y': int(np.max(nonzero_y)),
+                'mean_y': float(np.mean(nonzero_y))
             }
         else:
             self.pixel_stats = {'min_y': 0, 'max_y': 0, 'mean_y': 0.0}
         
-        return full_binary
+        debug_info['full_binary'] = full_binary
+        self._last_preprocess_debug = debug_info
+        
+        return full_binary, debug_info
 
     def _suppress_vehicle_colors(self, image: np.ndarray) -> np.ndarray:
         """노란/녹색 차량 색상을 제거하는 마스크"""
@@ -945,7 +973,8 @@ class LaneDetector:
         self.frame_count += 1
         
         # 1. 전처리
-        binary = self.preprocess_frame(frame)
+        # [Task 1-1] 복합 알고리즘 전처리 (디버그 정보 포함)
+        binary, preprocess_debug = self.preprocess_frame(frame)
         
         # 2. 원근 변환
         binary_warped = self.warp_perspective(binary)
@@ -1118,6 +1147,9 @@ class LaneDetector:
             'right_fit': self.right_fit,
             'binary': binary,
             'binary_warped': binary_warped,
+            'preprocess_debug': preprocess_debug,
+            'lane_width_history': self.lane_width_history,
+            'lane_width_learning_complete': self.lane_width_learning_complete,
             'binary_filled': binary_filled,
             'gap_mask': gap_mask,
             'gap_flags': gap_flags,
@@ -1217,6 +1249,75 @@ class LaneDetector:
         ) / abs(2 * right_fit_cr[0])
         
         return left_curverad, right_curverad
+
+
+    def compute_line_iou(self, pred_fit: np.ndarray, gt_fit: np.ndarray, 
+                         image_height: int, num_points: int = 72) -> float:
+        """Line IoU Loss 계산 (CLRNet)"""
+        if pred_fit is None or gt_fit is None:
+            return 0.0
+        y_samples = np.linspace(0, image_height - 1, num_points)
+        pred_x = pred_fit[0] * y_samples**2 + pred_fit[1] * y_samples + pred_fit[2]
+        gt_x = gt_fit[0] * y_samples**2 + gt_fit[1] * y_samples + gt_fit[2]
+        distances = np.abs(pred_x - gt_x)
+        threshold = 15
+        tp = np.sum(distances < threshold)
+        fp = np.sum(distances >= threshold)
+        iou = tp / (tp + fp + fp + 1e-9)
+        return float(iou)
+
+    def validate_lane_geometry_strict(self, left_fit: np.ndarray, right_fit: np.ndarray, 
+                                       image_shape: tuple) -> Tuple[bool, str]:
+        """엄격한 기하학적 검증 (5단계)"""
+        if left_fit is None or right_fit is None:
+            return False, "missing_fit"
+        
+        height, width = image_shape[:2]
+        y_bottom = height - 1
+        y_mid = height // 2
+        
+        left_x_bottom = left_fit[0]*y_bottom**2 + left_fit[1]*y_bottom + left_fit[2]
+        right_x_bottom = right_fit[0]*y_bottom**2 + right_fit[1]*y_bottom + right_fit[2]
+        lane_width_bottom = right_x_bottom - left_x_bottom
+        
+        expected_width = self.avg_lane_width
+        if not (expected_width * 0.6 < lane_width_bottom < expected_width * 1.4):
+            return False, f"width_{lane_width_bottom:.0f}"
+        
+        left_slope = 2 * left_fit[0] * y_mid + left_fit[1]
+        right_slope = 2 * right_fit[0] * y_mid + right_fit[1]
+        if abs(left_slope - right_slope) > 0.4:
+            return False, f"parallel_{abs(left_slope - right_slope):.2f}"
+        
+        center_x = (left_x_bottom + right_x_bottom) / 2
+        if abs(center_x - width / 2) > width * 0.4:
+            return False, f"position_{center_x:.0f}"
+        
+        if abs(left_fit[0]) > 0.002 or abs(right_fit[0]) > 0.002:
+            return False, "curvature"
+        
+        return True, "passed"
+
+    def learn_lane_width(self, left_fit: np.ndarray, right_fit: np.ndarray, 
+                         image_height: int) -> None:
+        """차선 폭 학습 (첫 30프레임)"""
+        if self.lane_width_learning_complete:
+            return
+        if left_fit is None or right_fit is None:
+            return
+        
+        y_bottom = image_height - 1
+        left_x = left_fit[0]*y_bottom**2 + left_fit[1]*y_bottom + left_fit[2]
+        right_x = right_fit[0]*y_bottom**2 + right_fit[1]*y_bottom + right_fit[2]
+        current_width = right_x - left_x
+        
+        if 300 < current_width < 700:
+            self.lane_width_history.append(current_width)
+        
+        if len(self.lane_width_history) >= 30:
+            self.avg_lane_width = float(np.median(self.lane_width_history))
+            self.lane_width_learning_complete = True
+            print(f"[Lane Width] Learned: {self.avg_lane_width:.1f}px")
 
     def _sanity_check(
         self,
