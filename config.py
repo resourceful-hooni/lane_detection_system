@@ -8,15 +8,22 @@ import numpy as np
 @dataclass
 class CameraConfig:
     """카메라 관련 설정"""
-    width: int = 848
-    height: int = 480
-    fps: int = 60
+    # [Task 11] 640x360 @ 30fps로 최적화 (LattePanda 성능 대응)
+    width: int = 640
+    height: int = 360
+    fps: int = 30
     camera_index: int = 1
     camera_height_mm: float = 450.0
     camera_angle_deg: float = 23.0
     auto_exposure: bool = True
     exposure: int = -6
     auto_white_balance: bool = True
+    
+    # [Task 11] 해상도 프리셋
+    # PRESET_LOW: 640x360 @ 30fps (LattePanda 권장)
+    # PRESET_MED: 848x480 @ 30fps
+    # PRESET_HIGH: 848x480 @ 60fps (고성능 PC)
+    resolution_preset: str = "PRESET_LOW"
 
 @dataclass
 class LaneDetectionConfig:
@@ -39,17 +46,25 @@ class LaneDetectionConfig:
     canny_low_threshold: int = 50
     canny_high_threshold: int = 100
     gaussian_kernel_size: int = 5
+    
+    # [Task 4] Adaptive Threshold 설정
+    enable_adaptive_threshold: bool = True  # 적응적 threshold 활성화
+    threshold_low_light: int = 100          # 어두운 환경 threshold
+    threshold_normal: int = 150             # 보통 환경 threshold
+    threshold_bright: int = 180             # 밝은 환경 threshold
+    white_saturation_max: int = 80          # 흰색 채도 최대값
 
     # Perspective/본네트 mask 관련 값 (차선 검출 정확도 높이기 위해 추가됨)
-    lane_left_x: int = 120
-    lane_right_x: int = 728
-    horizon_y: int = 120
-    hood_bottom_y: int = 480
-    hood_top_y: int = 420
+    # [Task 11] 640x360 기준으로 스케일링됨
+    lane_left_x: int = 90   # 120 * (640/848) ≈ 90
+    lane_right_x: int = 550  # 728 * (640/848) ≈ 550
+    horizon_y: int = 90      # 120 * (360/480) = 90
+    hood_bottom_y: int = 360  # 480 * (360/480) = 360
+    hood_top_y: int = 315     # 420 * (360/480) = 315
     perspective_src_points: np.ndarray = None
     perspective_dst_points: np.ndarray = None
     auto_scale_perspective: bool = True
-    perspective_reference_resolution: Tuple[int, int] = (848, 480)
+    perspective_reference_resolution: Tuple[int, int] = (640, 360)  # [Task 11] 기준 해상도
     enable_hood_mask: bool = True
     hood_mask_polygon: np.ndarray = None
     hood_mask_path: str = "calibration/hood_mask.json"
@@ -58,9 +73,8 @@ class LaneDetectionConfig:
     def __post_init__(self):
         # Perspective 포인트 및 본네트 polygon 초기화
         if self.perspective_src_points is None:
-            # 사다리꼴 형태의 소스 포인트 (원근 효과 보정)
-            # 848x480 해상도 기준, 중앙 정렬 가정
-            img_w, img_h = 848, 480
+            # [Task 11] 640x360 해상도 기준
+            img_w, img_h = 640, 360
             center_x = img_w // 2
             
             # 하단: 보닛 바로 앞 (차선 너비 + 여유)
@@ -133,11 +147,12 @@ class PathPlanningConfig:
     pid_kd: float = 10.0       # 0.1 -> 10.0
     max_steering_angle_deg: float = 30.0
     lookahead_distance_m: float = 10.0
-    # Y축: 30m 가시거리 / 480px = 0.0625 m/px
-    ym_per_pix: float = 30.0 / 480
-    # X축: 차선폭(1.0m) / BEV차선폭(약 550px) = 0.0018 m/px
-    # BEV 폭 = 848 - (150*2) = 548px
-    xm_per_pix: float = 1.0 / 548
+    # [Task 11] 640x360 기준 픽셀-미터 변환
+    # Y축: 30m 가시거리 / 360px = 0.0833 m/px
+    ym_per_pix: float = 30.0 / 360
+    # X축: 차선폭(1.0m) / BEV차선폭(약 410px) = 0.00244 m/px
+    # BEV 폭 = 640 - (115*2) = 410px (margin 비례 축소)
+    xm_per_pix: float = 1.0 / 410
 
 @dataclass
 class GUIConfig:
