@@ -347,46 +347,85 @@ class AdvancedCalibrationTool:
         white_range = range(100, 240, 10)
         gray_range = range(100, 240, 10)
         
-        best_result = SearchResult(score=-1, white_thresh=0, gray_thresh=0, lane_width=0, left_x=0, right_x=0, avg_pixel_density=0)
+        # [New] Geometry Search Range (Trapezoid Top Width)
+        # 0.7 ~ 0.95 (Parallelism check)
+        trap_range = np.arange(0.75, 0.96, 0.05)
         
-        total_steps = len(white_range) * len(gray_range)
+        best_result = SearchResult(score=-1, white_thresh=0, gray_thresh=0, lane_width=0, left_x=0, right_x=0, avg_pixel_density=0)
+        best_trap_ratio = self.roi_trap_ratio
+        
+        total_steps = len(white_range) * len(gray_range) * len(trap_range)
         curr_step = 0
         
         # 실패 원인 분석용
         fail_reasons = {}
         
-        # Perspective Transform 행렬 미리 계산 (Geometry는 고정)
-        M = cv2.getPerspectiveTransform(self.src_points, self.detector.config.lane_detection.perspective_dst_points)
+        # Visualization Window
+        cv2.namedWindow("Auto Search Debug", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("Auto Search Debug", 640, 360)
         
-        for w_th in white_range:
-            for g_th in gray_range:
-                # 설정 적용
-                self.detector.config.lane_detection.white_threshold = w_th
-                self.detector.config.lane_detection.gray_threshold = g_th
-                
-                # 전처리
-                binary, _ = self.detector.preprocess_frame(frame)
-                warped = cv2.warpPerspective(binary, M, (w, h))
-                
-                # 평가
-                score, lx, rx, density, reason = self.evaluate_frame(warped, (h, w))
-                
-                if score > best_result.score:
-                    width = rx - lx
-                    # 차선 폭이 너무 좁거나(붙어있음) 너무 넓으면(오인식) 제외
-                    # [Debug] 폭 조건 완화 (100~90% -> 50~95%)
-                    if 50 < width < w * 0.95:
-                        best_result = SearchResult(score, w_th, g_th, width, lx, rx, density)
-                        print(f"  New Best! Score:{score:.2f} | W:{w_th} G:{g_th} | Width:{width} | Density:{density:.0f}")
+        for t_ratio in trap_range:
+            # Update Geometry
+            self.detector.recalculate_perspective_points(
+                top_width_ratio=t_ratio * 0.5,
+                bottom_width_ratio=0.85,
+                height_ratio=0.4 # Default look distance
+            )
+            M = cv2.getPerspectiveTransform(
+                self.detector.config.lane_detection.perspective_src_points,
+                self.detector.config.lane_detection.perspective_dst_points
+            )
+            
+            for w_th in white_range:
+                for g_th in gray_range:
+                    # 설정 적용
+                    self.detector.config.lane_detection.white_threshold = w_th
+                    self.detector.config.lane_detection.gray_threshold = g_th
+                    
+                    # 전처리
+                    binary, _ = self.detector.preprocess_frame(frame)
+                    warped = cv2.warpPerspective(binary, M, (w, h))
+                    
+                    # 평가
+                    score, lx, rx, density, reason = self.evaluate_frame(warped, (h, w))
+                    
+                    # [Visualization] Show current trial
+                    debug_img = cv2.cvtColor(warped, cv2.COLOR_GRAY2BGR)
+                    status_color = (0, 0, 255)
+                    if score > 0:
+                        cv2.line(debug_img, (lx, 0), (lx, h), (0, 255, 0), 2)
+                        cv2.line(debug_img, (rx, 0), (rx, h), (0, 255, 0), 2)
+                        status_color = (0, 255, 0)
+                    
+                    cv2.putText(debug_img, f"Step: {curr_step}/{total_steps}", (10, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                    cv2.putText(debug_img, f"W:{w_th} G:{g_th} Trap:{t_ratio:.2f}", (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+                    cv2.putText(debug_img, f"Score: {score:.2f} ({reason})", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.5, status_color, 1)
+                    
+                    cv2.imshow("Auto Search Debug", debug_img)
+                    cv2.waitKey(1)
+                    
+                    if score > best_result.score:
+                        width = rx - lx
+                        # 차선 폭이 너무 좁거나(붙어있음) 너무 넓으면(오인식) 제외
+                        # [Debug] 폭 조건 완화 (100~90% -> 50~95%)
+                        if 50 < width < w * 0.95:
+                            best_result = SearchResult(score, w_th, g_th, width, lx, rx, density)
+                            best_trap_ratio = t_ratio
+                            print(f"  New Best! Score:{score:.2f} | W:{w_th} G:{g_th} Trap:{t_ratio:.2f} | Width:{width}")
+                        else:
+                            r = f"Width Out of Range ({width})"
+                            fail_reasons[r] = fail_reasons.get(r, 0) + 1
                     else:
-                        r = f"Width Out of Range ({width})"
-                        fail_reasons[r] = fail_reasons.get(r, 0) + 1
-                else:
-                    fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
-                
-                curr_step += 1
-                if curr_step % 50 == 0:
-                    print(f"  Progress: {curr_step}/{total_steps}")
+                        fail_reasons[reason] = fail_reasons.get(reason, 0) + 1
+                    
+                    curr_step += 1
+                    if curr_step % 50 == 0:
+                        print(f"  Progress: {curr_step}/{total_steps}")
+        
+        cv2.destroyWindow("Auto Search Debug")
+        
+        # Apply best geometry
+        self.roi_trap_ratio = best_trap_ratio
         
         if best_result.score <= 0:
             print("\n[FAIL Analysis] 실패 원인 분석:")
@@ -438,7 +477,7 @@ class AdvancedCalibrationTool:
         # 7. Trapezoid Ratio (자동 맞춤)
         # 차선이 11자라면 상단 폭도 하단 폭과 비슷해야 함
         # 하지만 원근 왜곡 보정이 완벽하지 않을 수 있으므로 0.8 정도로 설정
-        params['roi_trapezoid_top_width_ratio'] = 0.85
+        params['roi_trapezoid_top_width_ratio'] = self.roi_trap_ratio
         
         return params
 
