@@ -33,6 +33,7 @@ class DataLogger:
         # 비디오 파일
         self.video_writer = None
         self.video_path = None
+        self.is_recording = False  # 녹화 상태 플래그
         
         # 로깅 시작 시간
         self.start_time = None
@@ -61,28 +62,55 @@ class DataLogger:
             
             print(f"[INFO] CSV 로그 생성: {self.csv_path}")
         
-        # 비디오 로깅 초기화
-        if self.config.logging.save_video:
-            self.video_path = os.path.join(
-                self.config.logging.video_dir,
-                f"lane_video_{self.timestamp}{self.config.logging.video_extension}"
-            )
-            
-            # 코덱 설정
-            fourcc = cv2.VideoWriter_fourcc(*self.config.logging.video_codec)
-            
-            # VideoWriter 생성
-            self.video_writer = cv2.VideoWriter(
-                self.video_path,
-                fourcc,
-                self.config.logging.video_fps,
-                (self.config.camera.width, self.config.camera.height)
-            )
-            
-            print(f"[INFO] 비디오 저장 시작: {self.video_path}")
+        # 비디오 로깅은 이제 수동으로 시작합니다.
+        # if self.config.logging.save_video: ... (Removed)
         
         # 시작 시간 기록
         self.start_time = datetime.now()
+
+    def start_recording(self):
+        """비디오 녹화 시작"""
+        if self.is_recording:
+            return
+
+        self.video_path = os.path.join(
+            self.config.logging.video_dir,
+            f"lane_video_{datetime.now().strftime('%Y%m%d_%H%M%S')}{self.config.logging.video_extension}"
+        )
+        
+        # 코덱 설정
+        fourcc = cv2.VideoWriter_fourcc(*self.config.logging.video_codec)
+        
+        # VideoWriter 생성
+        self.video_writer = cv2.VideoWriter(
+            self.video_path,
+            fourcc,
+            self.config.logging.video_fps,
+            (self.config.camera.width, self.config.camera.height)
+        )
+        
+        self.is_recording = True
+        print(f"[INFO] 비디오 녹화 시작: {self.video_path}")
+
+    def stop_recording(self):
+        """비디오 녹화 중지"""
+        if not self.is_recording:
+            return
+
+        if self.video_writer is not None:
+            self.video_writer.release()
+            self.video_writer = None
+        
+        self.is_recording = False
+        print(f"[INFO] 비디오 녹화 중지 (저장됨): {self.video_path}")
+
+    def toggle_recording(self) -> bool:
+        """녹화 상태 토글 (Returns: 현재 녹화 중 여부)"""
+        if self.is_recording:
+            self.stop_recording()
+        else:
+            self.start_recording()
+        return self.is_recording
     
     def log_frame_data(
         self,
@@ -141,7 +169,7 @@ class DataLogger:
         Args:
             frame: 저장할 프레임 (오버레이 포함)
         """
-        if not self.config.logging.save_video or self.video_writer is None:
+        if not self.is_recording or self.video_writer is None:
             return
         
         # 프레임 쓰기
@@ -157,10 +185,7 @@ class DataLogger:
             print(f"       파일: {self.csv_path}")
         
         # 비디오 파일 닫기
-        if self.video_writer is not None:
-            self.video_writer.release()
-            print(f"[INFO] 비디오 저장 완료: {self.frame_count} 프레임")
-            print(f"       파일: {self.video_path}")
+        self.stop_recording()
     
     def __del__(self):
         """소멸자 - 자동으로 파일 닫기"""

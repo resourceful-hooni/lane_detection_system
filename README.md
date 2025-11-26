@@ -4,6 +4,10 @@
 
 ## ✨ 주요 기능
 - **고속 차선 검출 파이프라인**: 색상+에지 결합, 원근 변환(Remap 최적화), 슬라이딩 윈도우/이전 프레임 기반 탐색.
+- **엄격한 기하학적 검증 (Anti-Crossing)**: 차선 교차 방지 및 최소 폭 검사를 통해 물리적으로 불가능한 차선(꼬임, 교차)을 원천 차단.
+- **Hood-based Search Constraint**: 차량 보닛(Hood) 마스크가 설정된 경우, 차선 탐색 시작점을 보닛 좌우 끝으로 강제하여 오검출 최소화.
+- **고급 전처리 (CLAHE)**: 조명 변화가 심한 환경에서도 차선 식별력을 높이기 위해 CLAHE(Contrast Limited Adaptive Histogram Equalization) 적용.
+- **Windows 카메라 노출 최적화**: Windows 환경(DirectShow)에서 자동/수동 노출 설정이 제대로 적용되도록 호환성 개선.
 - **고급 ROI 및 필터링**: 4방향(상하좌우) ROI 크롭, 사다리꼴 마스크(Trapezoid Mask), Blob 필터(차량/노이즈 제거) 지원.
 - **Kalman Filter & Joint Fitting**: 차선 위치 추적 및 양쪽 차선의 곡률을 평행하게 유지하는 Joint Fitting(Parallel Lock) 알고리즘 적용.
 - **적응형 차선 폭 학습**: 주행 중 실제 차선 폭을 학습하여 한쪽 차선만 보일 때도 정확한 위치 복원.

@@ -28,29 +28,41 @@ class CameraConfig:
 @dataclass
 class LaneDetectionConfig:
     """차선 검출 관련 설정"""
-    roi_top_ratio: float = 0.3
+    roi_top_ratio: float = 0.0         # [User Request] 0.3 -> 0.0 (전체 높이 사용)
     roi_bottom_ratio: float = 1.0
     roi_left_ratio: float = 0.0
     roi_right_ratio: float = 1.0
     roi_trapezoid_top_width_ratio: float = 1.0  # 사다리꼴 상단 너비 비율 (0.0 ~ 1.0)
     enable_joint_fitting: bool = True  # 양쪽 차선을 평행하게 강제 맞춤 (꼬임 방지)
+    # [LattePanda Optimized] Strict Noise Filtering Parameters
     enable_blob_filter: bool = True    # 덩어리 필터링 (차량 등 비차선 객체 제거)
-    blob_min_height: int = 15          # 최소 높이 (너무 작은 점 제거)
-    blob_max_width: int = 80           # 최대 너비 (너무 넓은 물체=차량 제거)
-    white_threshold: int = 200
-    black_threshold: int = 100
-    enable_vehicle_color_suppression: bool = True
-    enable_triplet_detection: bool = True
+    blob_min_height: int = 100         # 50 -> 100 (짧은 노이즈 제거 강화)
+    blob_min_width: int = 40           # 30 -> 40 (얇은 노이즈 제거)
+    blob_max_width: int = 250          # 150 -> 250 (두꺼운 차선 허용)
+    white_threshold: int = 235         # HLS L-channel Threshold (235~255)
+    gray_threshold: int = 225          # Grayscale Threshold (225~255)
+    
+    # Morphology
+    morph_kernel_open: int = 3         # 7 -> 3 (LattePanda 최적화)
+    morph_kernel_close: int = 5        # 11 -> 5 (LattePanda 최적화)
+    morph_iterations: int = 1          # 반복 횟수
+    
+    # Blob Filter
+    blob_min_aspect_ratio: float = 1.5 # 최소 종횡비 (Height/Width)
+    
+    # ROI Mask (BEV)
+    roi_mask_top_ratio: float = 0.0    # BEV 상단 마스킹 비율
+    roi_mask_bottom_ratio: float = 1.0 # BEV 하단 마스킹 비율
+    roi_mask_side_margin: int = 50     # BEV 좌우 마스킹 픽셀
+    
+    # [GUI Tunable] Strict ROI Mask (BEV)
+    roi_mask_top_ratio: float = 0.0    # BEV 상단 마스킹 비율 (0.0 ~ 1.0) - 전체 영역 탐색
+    roi_mask_side_margin: int = 0      # BEV 좌우 마스킹 픽셀 - 전체 영역 탐색
     
     # [complete-fix-guide] 추가 파라미터
     use_row_anchor: bool = True  # Row-Anchor Detection 사용
     line_iou_threshold: float = 0.5  # Line IoU 임계값
     enable_strict_validation: bool = True  # 엄격한 기하학적 검증
-    triplet_gradient_threshold: int = 45
-    triplet_morph_kernel: Tuple[int, int] = (9, 3)
-    canny_low_threshold: int = 50
-    canny_high_threshold: int = 100
-    gaussian_kernel_size: int = 5
     
     # [Task 4] Adaptive Threshold 설정
     enable_adaptive_threshold: bool = True  # 적응적 threshold 활성화
@@ -140,14 +152,16 @@ class LaneDetectionConfig:
 @dataclass
 class SlidingWindowConfig:
     n_windows: int = 12
-    margin: int = 100   # 80 -> 100으로 변경 (사용자 요청)
+    margin: int = 100    # 50 -> 100 (넓은 차선 대응)
     min_pixels: int = 50
     histogram_start_ratio: float = 0.0
+    search_y_start_ratio: float = 0.0  # 검색 시작 Y 비율 (0.0 = Top)
+    search_y_end_ratio: float = 1.0    # 검색 종료 Y 비율 (1.0 = Bottom)
 
 @dataclass
 class RowAnchorConfig:
     """[Task 6] Row-Anchor Detection 설정"""
-    enabled: bool = True        # Row-Anchor 사용 여부 (True: Row-Anchor, False: Sliding Window)
+    enabled: bool = False       # [Fix] False로 변경하여 엄격한 Sliding Window 강제 사용
     num_rows: int = 36          # 샘플링 row 개수 (72보다 36이 2배 빠름)
     search_range: int = 50      # anchor 기준 탐색 범위 (±픽셀)
     min_pixels: int = 10        # row당 최소 픽셀 수
@@ -256,7 +270,6 @@ if __name__ == "__main__":
     print(f"ROI: 상단 {cfg.lane_detection.roi_top_ratio*100:.0f}% ~ 하단 {cfg.lane_detection.roi_bottom_ratio*100:.0f}%")
     print(f"사용 영역: {int(cfg.camera.height * cfg.lane_detection.roi_bottom_ratio)}픽셀")
     print(f"흰색 임계값: {cfg.lane_detection.white_threshold}")
-    print(f"Canny 임계값: {cfg.lane_detection.canny_low_threshold}-{cfg.lane_detection.canny_high_threshold}")
     print("\n=== 경로 계획 설정 ===")
     print(f"PID 게인: Kp={cfg.path_planning.pid_kp}, Ki={cfg.path_planning.pid_ki}, Kd={cfg.path_planning.pid_kd}")
     print(f"최대 조향각: {cfg.path_planning.max_steering_angle_deg}도")

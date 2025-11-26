@@ -54,7 +54,15 @@ class LaneDetectionSystem:
         self.enable_gui = enable_gui and GUIController is not None
         self.display_window = display_window
         self.bridge = labview_bridge
-        self.gui = GUIController(update_callback=self._on_parameter_change) if self.enable_gui else None
+        self.gui = GUIController(
+            update_callback=self._on_parameter_change,
+            record_callback=self.data_logger.toggle_recording
+        ) if self.enable_gui else None
+        
+        # [디버그 창 초기화] - complete-fix-guide.md
+        if self.gui and hasattr(self.gui, 'setup_debug_windows'):
+            self.gui.setup_debug_windows()
+        
         self.max_frames = max_frames if max_frames and max_frames > 0 else None
         self.frame_size = (self.config.camera.height, self.config.camera.width)
         
@@ -137,11 +145,38 @@ class LaneDetectionSystem:
         self.frame_size = (actual_height, actual_width)
         
         # 자동 노출 설정
-        if self.config.camera.auto_exposure:
-            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # 자동
+        # Windows (DSHOW)와 Linux (V4L2)의 설정 값이 다를 수 있음
+        if os.name == 'nt':
+            # Windows DSHOW: 0.25(Manual), 0.75(Auto)가 일반적이나 드라이버마다 다름
+            # 일부 드라이버는 0(Auto), 1(Manual) 또는 1(Manual), 3(Auto) 사용
+            # 여기서는 가장 일반적인 방식 시도
+            try:
+                if self.config.camera.auto_exposure:
+                    # 시도 1: DSHOW Auto (0.75)
+                    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+                    if cap.get(cv2.CAP_PROP_AUTO_EXPOSURE) != 0.75:
+                        # 시도 2: V4L2 Style Auto (3)
+                        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)
+                else:
+                    # 시도 1: DSHOW Manual (0.25)
+                    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
+                    
+                    # 노출값 설정 (Windows는 보통 -13 ~ -1 사이의 음수 값)
+                    # 사용자가 설정한 값이 양수라면 음수로 변환 시도 (로그 스케일 고려 안함, 단순 부호 변경)
+                    exposure_val = self.config.camera.exposure
+                    if exposure_val > 0:
+                        exposure_val = -exposure_val
+                    
+                    cap.set(cv2.CAP_PROP_EXPOSURE, exposure_val)
+            except Exception as e:
+                print(f"[WARN] 노출 설정 중 오류 발생: {e}")
         else:
-            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 수동
-            cap.set(cv2.CAP_PROP_EXPOSURE, self.config.camera.exposure)
+            # Linux (V4L2)
+            if self.config.camera.auto_exposure:
+                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 3)  # 자동
+            else:
+                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # 수동
+                cap.set(cv2.CAP_PROP_EXPOSURE, self.config.camera.exposure)
         
         return cap
     
@@ -317,6 +352,34 @@ class LaneDetectionSystem:
         )
         y_offset += line_height
         
+        # [추가] 패턴 검증 상태
+        if 'validation_reason' in lane_result:
+            validation_text = lane_result['validation_reason']
+            
+            # 1. Geometry FAIL (Red)
+            if any(x in validation_text for x in ['width_invalid', 'parallel_invalid', 'curvature_invalid']):
+                cv2.putText(frame, f"Geometry FAIL: {validation_text}", (10, y_offset),
+                            font, font_scale, (0, 0, 255), thickness) # Red
+                y_offset += line_height
+            
+            # 2. Pattern FAIL (Yellow)
+            elif 'pattern_fail' in validation_text:
+                cv2.putText(frame, f"Pattern FAIL: {validation_text}", (10, y_offset),
+                            font, font_scale, (0, 255, 255), thickness) # Yellow
+                y_offset += line_height
+                
+            # 3. Blob FAIL (Orange) - missing_fit usually means blob filtering removed everything
+            elif 'missing_fit' in validation_text:
+                 cv2.putText(frame, "Blob FAIL: No valid blobs", (10, y_offset),
+                            font, font_scale, (0, 165, 255), thickness) # Orange
+                 y_offset += line_height
+
+            elif lane_result['detected']:
+                # 패턴 검증 통과
+                cv2.putText(frame, "Pattern: PASS", (10, y_offset),
+                            font, font_scale, (0, 255, 0), thickness)
+                y_offset += line_height
+        
         # 경로 정보
         if path_result['valid']:
             # 오프셋
@@ -489,7 +552,7 @@ class LaneDetectionSystem:
 
     def run(self):
         """메인 루프 실행"""
-        print("[INFO] 시스템 시작!")
+        print("[INFO] 시스템 시작! (GUI v2.0 적용 확인됨)")
         print("[INFO] 종료하려면 'q' 키 또는 Ctrl+C를 누르세요.")
         if self.enable_gui:
             print("[INFO] Tk GUI 활성화: 패널에서 일시정지/종료 가능")
@@ -516,6 +579,14 @@ class LaneDetectionSystem:
                     break
                 
                 lane_result = self.lane_detector.detect_lanes(frame)
+                
+                # [Debug Check] 데이터 흐름 확인
+                if self.frame_number % 60 == 0:
+                    if 'preprocess_debug' not in lane_result:
+                        print(f"[WARN] Frame {self.frame_number}: preprocess_debug 데이터가 누락되었습니다!")
+                    elif not lane_result['preprocess_debug']:
+                        print(f"[WARN] Frame {self.frame_number}: preprocess_debug 딕셔너리가 비어있습니다!")
+                
                 path_result = self.path_planner.plan_path(
                     lane_result,
                     self.config.camera.width,
@@ -532,8 +603,11 @@ class LaneDetectionSystem:
                 if self.gui:
                     self.gui.update_video(overlay_frame)
                     self.gui.update_status(self.fps, lane_result, path_result)
+                    # [디버그 창 업데이트] - complete-fix-guide.md
+                    if hasattr(self.gui, 'update_debug_windows'):
+                        self.gui.update_debug_windows(lane_result)
                     self.gui.update()
-                
+
                 if self.display_window:
                     cv2.imshow('Lane Detection (Press Q to quit)', overlay_frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
