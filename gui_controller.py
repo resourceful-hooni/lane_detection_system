@@ -328,6 +328,25 @@ class GUIController:
                         self.config.sliding_window.search_y_end_ratio,
                         lambda v: self._update_param("sliding_window", "search_y_end_ratio", float(v)))
 
+        # 6. Wide Lane & Force Straight (New)
+        wide_group = ttk.LabelFrame(scroll_frame, text="Wide Lane & Force Straight", padding=5)
+        wide_group.pack(fill="x", pady=5, padx=5)
+
+        self.force_straight_var = tk.BooleanVar(value=self.config.lane_detection.force_straight_on_gap)
+        def toggle_force_straight():
+            self._update_param("lane_detection", "force_straight_on_gap", self.force_straight_var.get())
+        
+        ttk.Checkbutton(wide_group, text="Force Straight on Gap (끊김 시 직선 강제)", 
+                        variable=self.force_straight_var, command=toggle_force_straight).pack(fill="x", pady=2)
+
+        self.lane_tol_scale = self._add_slider(wide_group, "Lane Width Tolerance", 0.1, 1.0, 0.05,
+                        self.config.lane_detection.lane_width_tolerance,
+                        lambda v: self._update_param("lane_detection", "lane_width_tolerance", float(v)))
+
+        self.max_lane_w_scale = self._add_slider(wide_group, "Max Lane Width (Px)", 100, 600, 10,
+                        self.config.lane_detection.max_lane_width_pixel,
+                        lambda v: self._update_param("lane_detection", "max_lane_width_pixel", int(float(v))))
+
     def _create_system_tab(self, parent):
         """시스템 탭 생성"""
         # 1. 디버그 윈도우 제어

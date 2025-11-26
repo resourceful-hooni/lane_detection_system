@@ -16,7 +16,7 @@ class CameraConfig:
     camera_height_mm: float = 450.0
     camera_angle_deg: float = 23.0
     auto_exposure: bool = True
-    exposure: int = -6
+    exposure: int = -4
     auto_white_balance: bool = True
     
     # [Task 11] 해상도 프리셋
@@ -28,42 +28,60 @@ class CameraConfig:
 @dataclass
 class LaneDetectionConfig:
     """차선 검출 관련 설정"""
-    roi_top_ratio: float = 0.0         # [User Request] 0.3 -> 0.0 (전체 높이 사용)
+    roi_top_ratio: float = 0.10         # [Indoor] 0.4 -> 0.1 (바닥을 보므로 상단 영역도 활용)
     roi_bottom_ratio: float = 1.0
     roi_left_ratio: float = 0.0
     roi_right_ratio: float = 1.0
-    roi_trapezoid_top_width_ratio: float = 1.0  # 사다리꼴 상단 너비 비율 (0.0 ~ 1.0)
+    roi_trapezoid_top_width_ratio: float = 0.85  # 사다리꼴 상단 너비 비율 (0.0 ~ 1.0)
     enable_joint_fitting: bool = True  # 양쪽 차선을 평행하게 강제 맞춤 (꼬임 방지)
     # [LattePanda Optimized] Strict Noise Filtering Parameters
     enable_blob_filter: bool = True    # 덩어리 필터링 (차량 등 비차선 객체 제거)
-    blob_min_height: int = 100         # 50 -> 100 (짧은 노이즈 제거 강화)
-    blob_min_width: int = 40           # 30 -> 40 (얇은 노이즈 제거)
-    blob_max_width: int = 250          # 150 -> 250 (두꺼운 차선 허용)
-    white_threshold: int = 235         # HLS L-channel Threshold (235~255)
-    gray_threshold: int = 225          # Grayscale Threshold (225~255)
+    blob_min_height: int = 30          # 594 -> 30 (안전한 기본값으로 복구)
+    blob_min_width: int = 5            # 10 -> 5 (얇은 차선 허용)
+    blob_max_width: int = 200          # 123 -> 200 (여유 있게)
+    white_threshold: int = 140         # 100 -> 140 (노이즈 방지)
+    gray_threshold: int = 120          # 100 -> 120 (노이즈 방지)
     
     # Morphology
-    morph_kernel_open: int = 3         # 7 -> 3 (LattePanda 최적화)
-    morph_kernel_close: int = 5        # 11 -> 5 (LattePanda 최적화)
+    morph_kernel_open: int = 5         # 5 (유지 - 노이즈 제거)
+    morph_kernel_close: int = 15       # 15 (유지 - 끊김 보완)
     morph_iterations: int = 1          # 반복 횟수
     
     # Blob Filter
-    blob_min_aspect_ratio: float = 1.5 # 최소 종횡비 (Height/Width)
+    blob_min_aspect_ratio: float = 0.8 # 1.0 -> 0.8 (카메라 각도로 인해 납작해질 수 있음)
     
     # ROI Mask (BEV)
     roi_mask_top_ratio: float = 0.0    # BEV 상단 마스킹 비율
     roi_mask_bottom_ratio: float = 1.0 # BEV 하단 마스킹 비율
-    roi_mask_side_margin: int = 50     # BEV 좌우 마스킹 픽셀
+    roi_mask_side_margin: int = 71     # BEV 좌우 마스킹 픽셀
     
     # [GUI Tunable] Strict ROI Mask (BEV)
     roi_mask_top_ratio: float = 0.0    # BEV 상단 마스킹 비율 (0.0 ~ 1.0) - 전체 영역 탐색
-    roi_mask_side_margin: int = 0      # BEV 좌우 마스킹 픽셀 - 전체 영역 탐색
+    roi_mask_side_margin: int = 71      # BEV 좌우 마스킹 픽셀 - 전체 영역 탐색
     
+    # [Legacy] Pattern Validation (GUI 호환성 유지용)
+    pattern_min_white_len: int = 5     # 최소 흰색 픽셀 길이
+    pattern_min_black_len: int = 5     # 최소 검은색 픽셀 길이
+    pattern_max_gap_len: int = 20      # 최대 끊김 허용 길이
+    pattern_min_segments: int = 2      # 최소 세그먼트 수
+    
+    # [Legacy] Canny Edge (Logging 호환성 유지용)
+    canny_low_threshold: int = 50
+    canny_high_threshold: int = 150
+
     # [complete-fix-guide] 추가 파라미터
     use_row_anchor: bool = True  # Row-Anchor Detection 사용
     line_iou_threshold: float = 0.5  # Line IoU 임계값
     enable_strict_validation: bool = True  # 엄격한 기하학적 검증
     
+    # [Task: Force Straight] 끊긴 구간 직선 강제
+    force_straight_on_gap: bool = True      # 끊긴 구간에서 직선 강제 활성화
+    straight_force_threshold: int = 100     # 이 픽셀 수보다 적으면 직선으로 간주 (점선 대응)
+    
+    # [Task: Wide Lane] 폭넓은 차선 대응
+    lane_width_tolerance: float = 0.8       # 0.6 -> 0.8 (차선 폭 변화 허용 범위 대폭 확대)
+    max_lane_width_pixel: int = 500         # 400 -> 500 (Blob Filter와 동기화)
+
     # [Task 4] Adaptive Threshold 설정
     enable_adaptive_threshold: bool = True  # 적응적 threshold 활성화
     threshold_low_light: int = 100          # 어두운 환경 threshold
@@ -71,11 +89,18 @@ class LaneDetectionConfig:
     threshold_bright: int = 180             # 밝은 환경 threshold
     white_saturation_max: int = 80          # 흰색 채도 최대값
 
+    # [Dynamic Tuning] 차선 폭 기반 자동 튜닝
+    enable_dynamic_tuning: bool = True
+    dynamic_margin_ratio: float = 0.25      # 차선 폭의 25%를 마진으로 설정 (예: 폭 600px -> 마진 150px)
+    dynamic_blob_min_width_ratio: float = 0.05 # 차선 폭의 5% (예: 30px)
+    dynamic_blob_max_width_ratio: float = 0.4  # 차선 폭의 40% (예: 240px)
+
     # Perspective/본네트 mask 관련 값 (차선 검출 정확도 높이기 위해 추가됨)
     # [Task 11] 640x360 기준으로 스케일링됨
-    lane_left_x: int = 90   # 120 * (640/848) ≈ 90
-    lane_right_x: int = 550  # 728 * (640/848) ≈ 550
-    horizon_y: int = 90      # 120 * (360/480) = 90
+    # [Fix] 좌우 끝 차선 인식을 위해 시야 범위 확장 (20 ~ 620)
+    lane_left_x: int = 212    # 90 -> 20 (좌측 끝까지 포함)
+    lane_right_x: int = 417  # 550 -> 620 (우측 끝까지 포함)
+    horizon_y: int = 100      # 120 * (360/480) = 90
     hood_bottom_y: int = 360  # 480 * (360/480) = 360
     hood_top_y: int = 315     # 420 * (360/480) = 315
     perspective_src_points: np.ndarray = None
@@ -151,9 +176,9 @@ class LaneDetectionConfig:
 
 @dataclass
 class SlidingWindowConfig:
-    n_windows: int = 12
-    margin: int = 100    # 50 -> 100 (넓은 차선 대응)
-    min_pixels: int = 50
+    n_windows: int = 9       # 12 -> 9 (속도 향상)
+    margin: int = 100        # 71 -> 100 (여유 있게)
+    min_pixels: int = 50     # 1188 -> 50 (안전한 기본값)
     histogram_start_ratio: float = 0.0
     search_y_start_ratio: float = 0.0  # 검색 시작 Y 비율 (0.0 = Top)
     search_y_end_ratio: float = 1.0    # 검색 종료 Y 비율 (1.0 = Bottom)
@@ -161,10 +186,10 @@ class SlidingWindowConfig:
 @dataclass
 class RowAnchorConfig:
     """[Task 6] Row-Anchor Detection 설정"""
-    enabled: bool = False       # [Fix] False로 변경하여 엄격한 Sliding Window 강제 사용
+    enabled: bool = False       # [Fix] False로 변경 (사용자 피드백: 이전 코드가 더 좋음)
     num_rows: int = 36          # 샘플링 row 개수 (72보다 36이 2배 빠름)
     search_range: int = 50      # anchor 기준 탐색 범위 (±픽셀)
-    min_pixels: int = 10        # row당 최소 픽셀 수
+    min_pixels: int = 50        # 1188 -> 50 (안전한 기본값)
     min_points_for_fit: int = 10  # 다항식 피팅에 필요한 최소 포인트 수
     fallback_to_sliding: bool = True  # Row-Anchor 실패 시 Sliding Window로 fallback
 

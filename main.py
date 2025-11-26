@@ -195,6 +195,32 @@ class LaneDetectionSystem:
         if section == "path_planning" and param.startswith("pid_"):
             self.path_planner.reset_pid()
             print("[INFO] PID 제어 변수 리셋됨")
+            
+        # [Fix] 카메라 노출 실시간 적용
+        if section == "camera" and param == "exposure":
+            if self.camera and self.camera.isOpened():
+                try:
+                    # Windows DSHOW: 음수 값 (-13 ~ -1)
+                    # Linux V4L2: 양수 값 (절대값 or index)
+                    # Config에는 보통 음수(-6)로 저장됨
+                    
+                    val = int(value)
+                    
+                    # OS별 처리 (기존 _initialize_camera 로직 참조)
+                    if os.name == 'nt':
+                        # 수동 모드 확인 (0.25)
+                        self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25) 
+                        # 값 적용 (음수 유지)
+                        if val > 0: val = -val
+                        self.camera.set(cv2.CAP_PROP_EXPOSURE, val)
+                    else:
+                        # Linux
+                        self.camera.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1) # Manual
+                        self.camera.set(cv2.CAP_PROP_EXPOSURE, val)
+                        
+                    print(f"[Camera] 노출값 업데이트: {val}")
+                except Exception as e:
+                    print(f"[WARN] 카메라 노출 업데이트 실패: {e}")
     
     def draw_lane_overlay(
         self,
