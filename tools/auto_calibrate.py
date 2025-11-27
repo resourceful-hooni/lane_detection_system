@@ -109,11 +109,25 @@ class AdvancedCalibrationTool:
             self.detector.config.lane_detection.roi_trapezoid_top_width_ratio = t_top
             
             # Update Perspective Points based on Look Dist & Trap Top
-            self.detector.recalculate_perspective_points(
-                top_width_ratio=t_top * 0.5, # 0.0 ~ 0.5 range
-                bottom_width_ratio=0.85,
-                height_ratio=look_dist
-            )
+            if hasattr(self.detector, 'recalculate_perspective_points'):
+                try:
+                    self.detector.recalculate_perspective_points(
+                        top_width_ratio=t_top * 0.5, # 0.0 ~ 0.5 range
+                        bottom_width_ratio=0.85,
+                        height_ratio=look_dist
+                    )
+                except Exception as _:
+                    # fallback to re-init transform if custom recalc fails
+                    try:
+                        self.detector._initialize_perspective_transform()
+                    except Exception:
+                        pass
+            else:
+                # backward-compatible fallback
+                try:
+                    self.detector._initialize_perspective_transform()
+                except Exception:
+                    pass
             # Sync src_points for Geometry mode
             self.src_points = self.detector.config.lane_detection.perspective_src_points
             try:
@@ -365,12 +379,24 @@ class AdvancedCalibrationTool:
         cv2.resizeWindow("Auto Search Debug", 640, 360)
         
         for t_ratio in trap_range:
-            # Update Geometry
-            self.detector.recalculate_perspective_points(
-                top_width_ratio=t_ratio * 0.5,
-                bottom_width_ratio=0.85,
-                height_ratio=0.4 # Default look distance
-            )
+            # Update Geometry (safe-call: older versions may not have recalculate_perspective_points)
+            if hasattr(self.detector, 'recalculate_perspective_points'):
+                try:
+                    self.detector.recalculate_perspective_points(
+                        top_width_ratio=t_ratio * 0.5,
+                        bottom_width_ratio=0.85,
+                        height_ratio=0.4 # Default look distance
+                    )
+                except Exception:
+                    try:
+                        self.detector._initialize_perspective_transform()
+                    except Exception:
+                        pass
+            else:
+                try:
+                    self.detector._initialize_perspective_transform()
+                except Exception:
+                    pass
             M = cv2.getPerspectiveTransform(
                 self.detector.config.lane_detection.perspective_src_points,
                 self.detector.config.lane_detection.perspective_dst_points
